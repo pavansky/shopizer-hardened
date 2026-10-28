@@ -39,8 +39,8 @@ public interface ProductAvailabilityRepository extends JpaRepository<ProductAvai
 	      + "join fetch p.product ppr "
 	      + "left join fetch ppr.descriptions pprd "
 	      + "left join fetch p.productVariant ppi "
-	      + "where ppr.sku=?1 or ppi.sku=?1 "
-	      + "and pm.code=?2")
+	      + "where ppr.merchantStore.code=?2 "
+	      + "and (ppr.sku=?1 or ppi.sku=?1)")
   List<ProductAvailability> getBySku(String productCode, String store);
   
   @Query(value = "select distinct p from ProductAvailability p "

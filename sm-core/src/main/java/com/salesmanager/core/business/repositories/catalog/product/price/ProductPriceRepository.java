@@ -32,19 +32,19 @@ public interface ProductPriceRepository extends JpaRepository<ProductPrice, Long
 	@Query(value = "select distinct p from ProductPrice p " + "left join fetch p.productAvailability pa "
 			+ "left join fetch pa.merchantStore pm " + "left join fetch p.descriptions pd "
 			+ "join fetch pa.product pap " + "left join fetch pa.productVariant ppi "
-			+ "where pap.sku=?1 or ppi.sku=?1 and pm.code=?2")
+			+ "where pap.merchantStore.code=?2 and (pap.sku=?1 or ppi.sku=?1)")
 	List<ProductPrice> findByProduct(String sku, String store);
 
 	@Query(value = "select distinct p from ProductPrice p " + "left join fetch p.productAvailability pa "
 			+ "left join fetch pa.merchantStore pm " + "left join fetch p.descriptions pd "
 			+ "join fetch pa.product pap " + "left join fetch pa.productVariant ppi "
-			+ "where pap.sku=?1 or ppi.sku=?1 and p.id=?2 and pm.code=?3")
+			+ "where pap.merchantStore.code=?3 and p.id=?2 and (pap.sku=?1 or ppi.sku=?1)")
 	ProductPrice findByProduct(String sku, Long priceId, String store);
 
 	@Query(value = "select distinct p from ProductPrice p " + "left join fetch p.productAvailability pa "
 			+ "left join fetch pa.merchantStore pm " + "left join fetch p.descriptions pd "
 			+ "join fetch pa.product pap " + "left join fetch pa.productVariant ppi "
-			+ "where pap.sku=?1 or ppi.sku=?1 and pa.id=?2 and pm.code=?3")
+			+ "where pap.merchantStore.code=?3 and pa.id=?2 and (pap.sku=?1 or ppi.sku=?1)")
 	List<ProductPrice> findByProductInventoty(String sku, Long ProductInventory, String store);
 
 }
