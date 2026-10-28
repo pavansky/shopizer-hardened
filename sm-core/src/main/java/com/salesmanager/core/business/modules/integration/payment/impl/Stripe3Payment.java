@@ -7,13 +7,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import javax.inject.Inject;
-
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.salesmanager.core.business.utils.ProductPriceUtils;
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.Order;
@@ -42,9 +39,6 @@ public class Stripe3Payment implements PaymentModule {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(Stripe3Payment.class);
 
-	@Inject
-	private ProductPriceUtils productPriceUtils;
-
 	private final static String AUTHORIZATION = "Authorization";
 	private final static String TRANSACTION = "Transaction";
 
@@ -56,11 +50,10 @@ public class Stripe3Payment implements PaymentModule {
 			throws IntegrationException {
 
 
-		String strAmount = String.valueOf(amount);
-		strAmount = strAmount.replace(".","");
-
 		Transaction transaction = new Transaction();
 		try {
+
+			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
 
 
 			String apiKey = configuration.getIntegrationKeys().get("secretKey");
@@ -78,7 +71,7 @@ public class Stripe3Payment implements PaymentModule {
 
 			PaymentIntentCreateParams createParams = new PaymentIntentCreateParams.Builder()
 					.setCurrency(store.getCurrency().getCode())
-					.setAmount(Long.parseLong(strAmount))
+					.setAmount(minorAmount)
 					.setCaptureMethod(PaymentIntentCreateParams.CaptureMethod.MANUAL)
 					.build();
 
@@ -234,9 +227,7 @@ public class Stripe3Payment implements PaymentModule {
 				throw te;
 			}
 
-			String amnt = productPriceUtils.getAdminFormatedAmount(store, order.getTotal());
-			String strAmount = String.valueOf(amnt);
-			strAmount = strAmount.replace(".","");
+			long minorAmount = StripeAmounts.toMinorUnits(order.getTotal(), store.getCurrency().getCode());
 
 			Stripe.apiKey = apiKey;
 
@@ -245,9 +236,11 @@ public class Stripe3Payment implements PaymentModule {
 					chargeId
 			);
 
+			checkCapturable(paymentIntent, minorAmount);
+
 			PaymentIntentCaptureParams params =
 					PaymentIntentCaptureParams.builder()
-							.setAmountToCapture(Long.parseLong(strAmount))
+							.setAmountToCapture(minorAmount)
 							.setStatementDescriptor(
 									store.getStorename().length() > 22 ?
 											store.getStorename().substring(0, 22) :
@@ -310,18 +303,12 @@ public class Stripe3Payment implements PaymentModule {
 		Transaction transaction = new Transaction();
 		try {
 			
-			String amnt = productPriceUtils.getAdminFormatedAmount(store, amount);
-			
-			//stripe does not support floating point
-			//so amnt * 100 or remove floating point
-			//553.47 = 55347
-			
-		
-			String strAmount = String.valueOf(amnt);
-			strAmount = strAmount.replace(".","");
+			//stripe expects an integer amount in the currency minor unit
+			//553.47 USD = 55347
+			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
 			
 			/*Map<String, Object> chargeParams = new HashMap<String, Object>();
-			chargeParams.put("amount", strAmount);
+			chargeParams.put("amount", minorAmount);
 			chargeParams.put("capture", true);
 			chargeParams.put("currency", store.getCurrency().getCode());
 			chargeParams.put("source", token); // obtained with Stripe.js
@@ -335,9 +322,11 @@ public class Stripe3Payment implements PaymentModule {
 					token
 		  	);
 
+			checkCapturable(paymentIntent, minorAmount);
+
 			PaymentIntentCaptureParams params =
 					PaymentIntentCaptureParams.builder()
-							.setAmountToCapture(Long.parseLong(strAmount))
+							.setAmountToCapture(minorAmount)
 							.setStatementDescriptor(
 									store.getStorename().length() > 22 ?
 											store.getStorename().substring(0, 22) :
@@ -396,16 +385,11 @@ public class Stripe3Payment implements PaymentModule {
 
 			String trnID = transaction.getTransactionDetails().get("TRNORDERNUMBER");
 			
-			String amnt = productPriceUtils.getAdminFormatedAmount(store, amount);
-			
+			//stripe expects an integer amount in the currency minor unit
+			//553.47 USD = 55347
+			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
+
 			Stripe.apiKey = apiKey;
-			
-			//stripe does not support floating point
-			//so amnt * 100 or remove floating point
-			//553.47 = 55347
-			
-			String strAmount = String.valueOf(amnt);
-			strAmount = strAmount.replace(".","");
 
 			PaymentIntent paymentIntent = PaymentIntent.retrieve(
 					trnID
@@ -413,7 +397,7 @@ public class Stripe3Payment implements PaymentModule {
 
 			Map<String, Object> params = new HashMap<>();
 			params.put("payment_intent", paymentIntent.getId());
-			params.put("amount", strAmount);
+			params.put("amount", minorAmount);
 			Refund re = Refund.create(params);
 
 			transaction = new Transaction();
@@ -440,6 +424,23 @@ public class Stripe3Payment implements PaymentModule {
 		
 	}
 	
+	/**
+	 * Fails with a precise message when the PaymentIntent cannot be captured for the requested amount.
+	 */
+	private void checkCapturable(PaymentIntent paymentIntent, long minorAmount) throws IntegrationException {
+		if(!"requires_capture".equals(paymentIntent.getStatus())
+				|| paymentIntent.getAmountCapturable() == null
+				|| minorAmount > paymentIntent.getAmountCapturable()) {
+			IntegrationException te = new IntegrationException(
+					"Can't capture Stripe PaymentIntent " + paymentIntent.getId() + ", status " + paymentIntent.getStatus()
+					+ ", capturable " + paymentIntent.getAmountCapturable() + ", requested " + minorAmount);
+			te.setExceptionType(IntegrationException.TRANSACTION_EXCEPTION);
+			te.setMessageCode("message.payment.error");
+			te.setErrorCode(IntegrationException.TRANSACTION_EXCEPTION);
+			throw te;
+		}
+	}
+
 	private IntegrationException buildException(Exception ex) {
 		
 		

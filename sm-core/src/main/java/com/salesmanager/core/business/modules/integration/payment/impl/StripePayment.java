@@ -7,14 +7,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import javax.inject.Inject;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.salesmanager.core.business.utils.ProductPriceUtils;
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.Order;
@@ -38,9 +35,6 @@ import com.stripe.model.Refund;
 
 public class StripePayment implements PaymentModule {
 	
-	@Inject
-	private ProductPriceUtils productPriceUtils;
-
 	
 	private final static String AUTHORIZATION = "Authorization";
 	private final static String TRANSACTION = "Transaction";
@@ -140,17 +134,12 @@ public class StripePayment implements PaymentModule {
 			}
 			
 
-			String amnt = productPriceUtils.getAdminFormatedAmount(store, amount);
-			
-			//stripe does not support floating point
-			//so amnt * 100 or remove floating point
-			//553.47 = 55347
-			
-			String strAmount = String.valueOf(amnt);
-			strAmount = strAmount.replace(".","");
+			//stripe expects an integer amount in the currency minor unit
+			//553.47 USD = 55347
+			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
 			
 			Map<String, Object> chargeParams = new HashMap<String, Object>();
-			chargeParams.put("amount", strAmount);
+			chargeParams.put("amount", minorAmount);
 			chargeParams.put("capture", false);
 			chargeParams.put("currency", store.getCurrency().getCode());
 			chargeParams.put("source", token); // obtained with Stripe.js
@@ -284,18 +273,12 @@ public class StripePayment implements PaymentModule {
 		Transaction transaction = new Transaction();
 		try {
 			
-			String amnt = productPriceUtils.getAdminFormatedAmount(store, amount);
-			
-			//stripe does not support floating point
-			//so amnt * 100 or remove floating point
-			//553.47 = 55347
-			
-		
-			String strAmount = String.valueOf(amnt);
-			strAmount = strAmount.replace(".","");
+			//stripe expects an integer amount in the currency minor unit
+			//553.47 USD = 55347
+			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
 			
 			Map<String, Object> chargeParams = new HashMap<String, Object>();
-			chargeParams.put("amount", strAmount);
+			chargeParams.put("amount", minorAmount);
 			chargeParams.put("capture", true);
 			chargeParams.put("currency", store.getCurrency().getCode());
 			chargeParams.put("source", token); // obtained with Stripe.js
@@ -353,22 +336,17 @@ public class StripePayment implements PaymentModule {
 
 			String trnID = transaction.getTransactionDetails().get("TRNORDERNUMBER");
 			
-			String amnt = productPriceUtils.getAdminFormatedAmount(store, amount);
-			
+			//stripe expects an integer amount in the currency minor unit
+			//553.47 USD = 55347
+			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
+
 			Stripe.apiKey = apiKey;
-			
-			//stripe does not support floating point
-			//so amnt * 100 or remove floating point
-			//553.47 = 55347
-			
-			String strAmount = String.valueOf(amnt);
-			strAmount = strAmount.replace(".","");
 
 			Charge ch = Charge.retrieve(trnID);
 
 			Map<String, Object> params = new HashMap<>();
 			params.put("charge", ch.getId());
-			params.put("amount", strAmount);
+			params.put("amount", minorAmount);
 			Refund re = Refund.create(params);
 
 			transaction = new Transaction();
