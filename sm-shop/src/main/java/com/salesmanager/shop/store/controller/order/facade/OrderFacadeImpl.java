@@ -40,7 +40,12 @@ import com.salesmanager.core.business.services.catalog.pricing.PricingService;
 import com.salesmanager.core.business.services.catalog.product.ProductService;
 import com.salesmanager.core.business.services.catalog.product.attribute.ProductAttributeService;
 import com.salesmanager.core.business.services.catalog.product.file.DigitalProductService;
+import com.salesmanager.core.business.services.order.OrderChargedNotRecordedException;
 import com.salesmanager.core.business.services.order.OrderService;
+import com.salesmanager.core.business.services.order.OrderStatusTransitions;
+import com.salesmanager.core.business.services.order.idempotency.IdempotencyConflictException;
+import com.salesmanager.core.business.services.order.idempotency.OrderIdempotencyService;
+import com.salesmanager.core.model.order.idempotency.OrderIdempotencyKey;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.TransactionService;
 import com.salesmanager.core.business.services.reference.country.CountryService;
@@ -117,6 +122,9 @@ public class OrderFacadeImpl implements OrderFacade {
 
 	@Inject
 	private OrderService orderService;
+
+	@Inject
+	private OrderIdempotencyService orderIdempotencyService;
 	@Inject
 	private ProductService productService;
 	@Inject
@@ -1189,6 +1197,89 @@ public class OrderFacadeImpl implements OrderFacade {
 		return quote;
 	}
 
+	@Override
+	public Order processOrder(com.salesmanager.shop.model.order.v1.PersistableOrder order, Customer customer,
+			MerchantStore store, Language language, Locale locale, String cartCode, String idempotencyKey)
+			throws ServiceException {
+
+		if (StringUtils.isBlank(idempotencyKey)) {
+			return processOrder(order, customer, store, language, locale);
+		}
+		Validate.notNull(store, "MerchantStore cannot be null");
+		if (idempotencyKey.length() > 255) {
+			throw new IdempotencyConflictException("Idempotency-Key must be at most 255 characters");
+		}
+
+		String requestHash = requestHash(order);
+		Integer merchantId = store.getId();
+
+		OrderIdempotencyKey existing = orderIdempotencyService.findKey(merchantId, idempotencyKey);
+		OrderIdempotencyKey claimed = null;
+		if (existing == null) {
+			try {
+				claimed = orderIdempotencyService.claimKey(merchantId, idempotencyKey, cartCode, requestHash);
+			} catch (RuntimeException e) {
+				// lost the race on the unique constraint: another request owns the key
+				existing = orderIdempotencyService.findKey(merchantId, idempotencyKey);
+				if (existing == null) {
+					throw e;
+				}
+			}
+		}
+		if (existing != null) {
+			return replay(existing, cartCode, requestHash, store);
+		}
+
+		Order result;
+		try {
+			result = processOrder(order, customer, store, language, locale);
+		} catch (OrderChargedNotRecordedException e) {
+			// charged: bind the key to the pending order so a retry can never charge again
+			orderIdempotencyService.completeKey(claimed.getId(), e.getOrderId());
+			throw e;
+		} catch (ServiceException | RuntimeException e) {
+			// no charge was captured: free the key so the client can retry with it
+			orderIdempotencyService.releaseKey(claimed.getId());
+			throw e;
+		}
+		orderIdempotencyService.completeKey(claimed.getId(), result.getId());
+		return result;
+	}
+
+	private Order replay(OrderIdempotencyKey existing, String cartCode, String requestHash, MerchantStore store) {
+		if (!StringUtils.equals(existing.getCartCode(), cartCode)) {
+			throw new IdempotencyConflictException("Idempotency-Key was already used for a different cart");
+		}
+		if (!StringUtils.equals(existing.getRequestHash(), requestHash)) {
+			throw new IdempotencyConflictException("Idempotency-Key was already used with a different request body");
+		}
+		if (existing.getOrderId() == null) {
+			throw new IdempotencyConflictException("A checkout with this Idempotency-Key is still in progress");
+		}
+		Order original = orderService.getOrder(existing.getOrderId(), store);
+		if (original == null) {
+			throw new IdempotencyConflictException("Order for this Idempotency-Key no longer exists");
+		}
+		return original;
+	}
+
+	static String requestHash(Object body) {
+		try {
+			byte[] json = new com.fasterxml.jackson.databind.ObjectMapper()
+					.configure(com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true)
+					.configure(com.fasterxml.jackson.databind.MapperFeature.SORT_PROPERTIES_ALPHABETICALLY, true)
+					.writeValueAsBytes(body);
+			byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(json);
+			StringBuilder hex = new StringBuilder(64);
+			for (byte b : digest) {
+				hex.append(String.format("%02x", b));
+			}
+			return hex.toString();
+		} catch (Exception e) {
+			throw new IllegalStateException("Cannot hash checkout request", e);
+		}
+	}
+
 	/**
 	 * Process order from api
 	 */
@@ -1625,14 +1716,19 @@ public class OrderFacadeImpl implements OrderFacade {
 	public void updateOrderStatus(Order order, OrderStatus newStatus, MerchantStore store) {
 
 		// make sure we are changing to different that current status
-		if (order.getStatus().equals(newStatus)) {
+		if (newStatus == null) {
+			throw new com.salesmanager.core.business.services.order.IllegalOrderStatusTransitionException(order.getStatus(), null);
+		}
+		if (newStatus.equals(order.getStatus())) {
 			return; // we have the same status, lets just return
 		}
 		OrderStatus oldStatus = order.getStatus();
+		// rejects anything not in the transition table (IllegalOrderStatusTransitionException -> 409)
+		OrderStatusTransitions.check(oldStatus, newStatus);
 		order.setStatus(newStatus);
 		OrderStatusHistory history = new OrderStatusHistory();
 
-		history.setComments( messages.getMessage("email.order.status.changed", new String[] {oldStatus.name(),
+		history.setComments( messages.getMessage("email.order.status.changed", new String[] {String.valueOf(oldStatus),
 				newStatus.name()}, LocaleUtils.getLocale(store)));
 		history.setCustomerNotified(0);
 		history.setStatus(newStatus);

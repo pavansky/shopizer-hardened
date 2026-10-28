@@ -21,7 +21,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -46,6 +48,9 @@ import com.salesmanager.shop.model.order.v1.PersistableAnonymousOrder;
 import com.salesmanager.shop.model.order.v1.PersistableOrder;
 import com.salesmanager.shop.model.order.v1.ReadableOrderConfirmation;
 import com.salesmanager.shop.populator.customer.ReadableCustomerPopulator;
+import com.salesmanager.core.business.services.order.IllegalOrderStatusTransitionException;
+import com.salesmanager.core.business.services.order.idempotency.IdempotencyConflictException;
+import com.salesmanager.shop.store.api.exception.ErrorEntity;
 import com.salesmanager.shop.store.api.exception.GenericRuntimeException;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.api.exception.ServiceRuntimeException;
@@ -350,6 +355,7 @@ public class OrderApi {
 			@Valid @RequestBody PersistableOrder order, // order
 			@ApiIgnore MerchantStore merchantStore,
 			@ApiIgnore Language language,
+			@RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
 			HttpServletRequest request,
 			HttpServletResponse response, Locale locale) throws Exception {
 
@@ -372,7 +378,8 @@ public class OrderApi {
 			order.setShoppingCartId(cart.getId());
 			order.setCustomerId(customer.getId());//That is an existing customer purchasing
 
-			Order modelOrder = orderFacade.processOrder(order, customer, merchantStore, language, locale);
+			Order modelOrder = orderFacade.processOrder(order, customer, merchantStore, language, locale, code,
+					idempotencyKey);
 			Long orderId = modelOrder.getId();
 			modelOrder.setId(orderId);
 
@@ -381,6 +388,8 @@ public class OrderApi {
 
 
 
+		} catch (IdempotencyConflictException | ResourceNotFoundException e) {
+			throw e;
 		} catch (Exception e) {
 			LOGGER.error("Error while processing checkout", e);
 			try {
@@ -408,7 +417,8 @@ public class OrderApi {
 			@PathVariable final String code,//shopping cart
 			@Valid @RequestBody PersistableAnonymousOrder order,//order
 			@ApiIgnore MerchantStore merchantStore,
-			@ApiIgnore Language language) {
+			@ApiIgnore Language language,
+			@RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
 
 		Validate.notNull(order.getCustomer(), "Customer must not be null");
 
@@ -444,7 +454,7 @@ public class OrderApi {
 			order.setShoppingCartId(cart.getId());
 
 			Order modelOrder = orderFacade.processOrder(order, customer, merchantStore, language,
-					LocaleUtils.getLocale(language));
+					LocaleUtils.getLocale(language), code, idempotencyKey);
 			Long orderId = modelOrder.getId();
 			//populate order confirmation
 			order.setId(orderId);
@@ -454,6 +464,8 @@ public class OrderApi {
 			return orderFacadeV1.orderConfirmation(modelOrder, customer, merchantStore, language);
 
 
+		} catch (IdempotencyConflictException e) {
+			throw e;
 		} catch (Exception e) {
 			if(e instanceof CredentialsException) {
 				throw new GenericRuntimeException("412","Credentials creation Failed [" + e.getMessage() + "]");
@@ -512,9 +524,35 @@ public class OrderApi {
 			throw new GenericRuntimeException("412", "Order not found [" + id + "]");
 		}
 
-		OrderStatus statusEnum = OrderStatus.valueOf(status);
+		OrderStatus statusEnum;
+		try {
+			statusEnum = OrderStatus.valueOf(StringUtils.trim(StringUtils.strip(status, "\"")));
+		} catch (IllegalArgumentException | NullPointerException e) {
+			throw new ServiceRuntimeException("400", "Unknown order status [" + status + "]");
+		}
 
 		orderFacade.updateOrderStatus(order, statusEnum, merchantStore);
 		return;
+	}
+
+	@ExceptionHandler(IdempotencyConflictException.class)
+	@ResponseStatus(HttpStatus.CONFLICT)
+	@ResponseBody
+	public ErrorEntity handleIdempotencyConflict(IdempotencyConflictException e) {
+		return error("409", e.getMessage());
+	}
+
+	@ExceptionHandler(IllegalOrderStatusTransitionException.class)
+	@ResponseStatus(HttpStatus.CONFLICT)
+	@ResponseBody
+	public ErrorEntity handleIllegalTransition(IllegalOrderStatusTransitionException e) {
+		return error("409", e.getMessage());
+	}
+
+	private static ErrorEntity error(String code, String message) {
+		ErrorEntity entity = new ErrorEntity();
+		entity.setErrorCode(code);
+		entity.setMessage(message);
+		return entity;
 	}
 }

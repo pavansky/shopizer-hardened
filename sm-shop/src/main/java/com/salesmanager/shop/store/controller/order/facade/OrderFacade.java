@@ -44,6 +44,15 @@ public interface OrderFacade {
 	/** process a valid order submitted from the API **/
 	Order processOrder(com.salesmanager.shop.model.order.v1.PersistableOrder order, Customer customer, MerchantStore store, Language language, Locale locale) throws ServiceException;
 
+	/**
+	 * Idempotent checkout. When idempotencyKey is blank this behaves like
+	 * {@link #processOrder(com.salesmanager.shop.model.order.v1.PersistableOrder, Customer, MerchantStore, Language, Locale)}.
+	 * A repeat with the same key and the same cart and body returns the original
+	 * order without charging again; a repeat with a different cart or body, or
+	 * while the first request is still running, throws IdempotencyConflictException.
+	 */
+	Order processOrder(com.salesmanager.shop.model.order.v1.PersistableOrder order, Customer customer, MerchantStore store, Language language, Locale locale, String cartCode, String idempotencyKey) throws ServiceException;
+
 
 
 	/** creates a working copy of customer when the user is anonymous **/

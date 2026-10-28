@@ -29,6 +29,10 @@
 			<tx:method name="get*" read-only="true" />
 			<tx:method name="list*" read-only="true" />
 			<tx:method name="search*" read-only="true" />
+			<!-- Checkout coordinates its own short transactions (reserve, charge, finalise).
+			     It must not run inside one long transaction, or the payment record written
+			     during the charge stays uncommitted and blocks the finalise step. -->
+			<tx:method name="processOrder" propagation="NOT_SUPPORTED" />
 			<tx:method name="*" read-only="false"
 				rollback-for="com.salesmanager.core.business.exception.ServiceException" />
 		</tx:attributes>

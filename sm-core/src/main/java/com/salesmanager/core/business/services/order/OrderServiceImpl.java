@@ -98,6 +98,9 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     @Inject
     private OrderTotalService orderTotalService;
 
+    @Inject
+    private OrderCheckoutSteps orderCheckoutSteps;
+
     private final OrderRepository orderRepository;
 
     @Inject
@@ -143,73 +146,43 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	}
 
 
-    	//first process payment
-    	Transaction processTransaction = paymentService.processPayment(customer, store, payment, items, order);
+    	// 1. committed step: reserve inventory and insert the order in PAYMENT_PENDING.
+    	//    An inventory shortfall fails here, before anything is charged.
+    	OrderStatus finalStatus = order.getStatus();
+    	if (finalStatus == null || finalStatus == OrderStatus.PAYMENT_PENDING) {
+    		finalStatus = OrderStatus.ORDERED;
+    	}
+    	order = orderCheckoutSteps.createPendingOrder(order, customer, items, transaction);
 
-    	if(order.getOrderHistory()==null || order.getOrderHistory().size()==0 || order.getStatus()==null) {
-    		OrderStatus status = order.getStatus();
-    		if(status==null) {
-    			status = OrderStatus.ORDERED;
-    			order.setStatus(status);
+    	// 2. charge (outside of any write that could still roll back the order)
+    	Transaction processTransaction;
+    	try {
+    		processTransaction = paymentService.processPayment(customer, store, payment, items, order);
+    	} catch (Exception e) {
+    		LOGGER.warn("Payment failed for order " + order.getId(), e);
+    		try {
+    			orderCheckoutSteps.markPaymentFailed(order.getId(), items, e.getMessage());
+    		} catch (RuntimeException markFailure) {
+    			LOGGER.error("Could not mark order " + order.getId() + " as PAYMENT_FAILED", markFailure);
     		}
-    		Set<OrderStatusHistory> statusHistorySet = new HashSet<OrderStatusHistory>();
-    		OrderStatusHistory statusHistory = new OrderStatusHistory();
-    		statusHistory.setStatus(status);
-    		statusHistory.setDateAdded(new Date());
-    		statusHistory.setOrder(order);
-    		statusHistorySet.add(statusHistory);
-    		order.setOrderHistory(statusHistorySet);
-
+    		order.setStatus(OrderStatus.PAYMENT_FAILED);
+    		if (e instanceof ServiceException) {
+    			throw (ServiceException) e;
+    		}
+    		throw new ServiceException(ServiceException.EXCEPTION_PAYMENT_DECLINED, e.getMessage());
     	}
 
-        if(customer.getId()==null || customer.getId()==0) {
-          customerService.create(customer);
-        }
-
-        order.setCustomerId(customer.getId());
-        this.create(order);
-
-    	if(transaction!=null) {
-    		transaction.setOrder(order);
-    		if(transaction.getId()==null || transaction.getId()==0) {
-    			transactionService.create(transaction);
-    		} else {
-    			transactionService.update(transaction);
-    		}
+    	// 3. committed step: mark the order paid and record the payment transaction.
+    	//    If this fails the order stays PAYMENT_PENDING with a captured charge and
+    	//    must be reconciled; it is never silently dropped.
+    	try {
+    		orderCheckoutSteps.markPaymentSucceeded(order.getId(), finalStatus, processTransaction);
+    	} catch (ServiceException | RuntimeException e) {
+    		LOGGER.error("Order " + order.getId() + " was charged but could not be marked " + finalStatus
+    				+ "; left in PAYMENT_PENDING for reconciliation", e);
+    		throw new OrderChargedNotRecordedException(order.getId(), e);
     	}
-
-    	if(processTransaction!=null) {
-    		processTransaction.setOrder(order);
-    		if(processTransaction.getId()==null || processTransaction.getId()==0) {
-    			transactionService.create(processTransaction);
-    		} else {
-    			transactionService.update(processTransaction);
-    		}
-    	}
-
-        /**
-         * decrement inventory
-         */
-    	LOGGER.debug( "Update inventory" );
-        Set<OrderProduct> products = order.getOrderProducts();
-        for(OrderProduct orderProduct : products) {
-            orderProduct.getProductQuantity();
-            Product p = productService.getById(orderProduct.getId());
-            if(p == null)
-                throw new ServiceException(ServiceException.EXCEPTION_INVENTORY_MISMATCH);
-            for(ProductAvailability availability : p.getAvailabilities()) {
-                int qty = availability.getProductQuantity();
-                if(qty < orderProduct.getProductQuantity()) {
-                    //throw new ServiceException(ServiceException.EXCEPTION_INVENTORY_MISMATCH);
-                	LOGGER.error("APP-BACKEND [" + ServiceException.EXCEPTION_INVENTORY_MISMATCH + "]");
-                }
-                qty = qty - orderProduct.getProductQuantity();
-                availability.setProductQuantity(qty);
-            }
-            productService.update(p);
-        }
-
-
+    	order.setStatus(finalStatus);
 
     	return order;
     }

@@ -7,6 +7,10 @@ public enum OrderStatus {
 	DELIVERED("delivered"),
 	REFUNDED("refunded"),
 	CANCELED("canceled"),
+	/** Order persisted, payment not yet confirmed. */
+	PAYMENT_PENDING("payment_pending"),
+	/** Payment was attempted and declined or errored; order kept for audit. */
+	PAYMENT_FAILED("payment_failed"),
 	;
 	
 	private String value;
