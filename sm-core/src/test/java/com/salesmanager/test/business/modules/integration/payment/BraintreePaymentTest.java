@@ -87,7 +87,7 @@ public class BraintreePaymentTest {
 		ArgumentCaptor<TransactionRequest> captor = ArgumentCaptor.forClass(TransactionRequest.class);
 		verify(transactionGateway).sale(captor.capture());
 		assertTrue(captor.getValue().toXML()
-				.contains("<submit-for-settlement type=\"boolean\">true</submit-for-settlement>"));
+				.contains("<submitForSettlement>true</submitForSettlement>"));
 		assertEquals(TransactionType.AUTHORIZECAPTURE, trx.getTransactionType());
 		assertEquals("SUBMITTED_FOR_SETTLEMENT", trx.getTransactionDetails().get("TRNAPPROVED"));
 		assertEquals("bt123", trx.getTransactionDetails().get("TRANSACTIONID"));

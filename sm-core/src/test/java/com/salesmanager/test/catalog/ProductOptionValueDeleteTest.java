@@ -8,6 +8,7 @@ import org.junit.Test;
 
 import com.salesmanager.core.model.catalog.product.Product;
 import com.salesmanager.core.model.catalog.product.attribute.ProductAttribute;
+import com.salesmanager.core.model.catalog.product.availability.ProductAvailability;
 import com.salesmanager.core.model.catalog.product.attribute.ProductOption;
 import com.salesmanager.core.model.catalog.product.attribute.ProductOptionDescription;
 import com.salesmanager.core.model.catalog.product.attribute.ProductOptionType;
@@ -42,6 +43,13 @@ public class ProductOptionValueDeleteTest extends com.salesmanager.test.common.A
 		description.setLanguage(en);
 		description.setProduct(product);
 		product.getDescriptions().add(description);
+
+		// saveProduct requires at least one availability row
+		ProductAvailability availability = new ProductAvailability();
+		availability.setProductQuantity(10);
+		availability.setRegion("*");
+		availability.setProduct(product);
+		product.getAvailabilities().add(availability);
 
 		productService.saveProduct(product);
 
