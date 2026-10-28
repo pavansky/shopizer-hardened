@@ -24,7 +24,6 @@ import com.salesmanager.core.model.system.IntegrationConfiguration;
 import com.salesmanager.core.model.system.IntegrationModule;
 import com.salesmanager.core.modules.integration.IntegrationException;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
-import com.stripe.Stripe;
 // import com.stripe.exception.APIConnectionException;
 import com.stripe.exception.AuthenticationException;
 import com.stripe.exception.CardException;
@@ -32,6 +31,7 @@ import com.stripe.exception.InvalidRequestException;
 import com.stripe.exception.StripeException;
 import com.stripe.model.Charge;
 import com.stripe.model.Refund;
+import com.stripe.net.RequestOptions;
 
 public class StripePayment implements PaymentModule {
 	
@@ -145,10 +145,10 @@ public class StripePayment implements PaymentModule {
 			chargeParams.put("source", token); // obtained with Stripe.js
 			chargeParams.put("description", new StringBuilder().append(TRANSACTION).append(" - ").append(store.getStorename()).toString());
 			
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 			
 			
-			Charge ch = Charge.create(chargeParams);
+			Charge ch = Charge.create(chargeParams, requestOptions);
 
 			//Map<String,String> metadata = ch.getMetadata();
 			
@@ -208,10 +208,10 @@ public class StripePayment implements PaymentModule {
 				}
 				
 
-				Stripe.apiKey = apiKey;
+				RequestOptions requestOptions = requestOptions(apiKey);
 				
-				Charge ch = Charge.retrieve(chargeId);
-				ch.capture();
+				Charge ch = Charge.retrieve(chargeId, requestOptions);
+				ch.capture(requestOptions);
 				
 				
 				transaction.setAmount(order.getTotal());
@@ -284,10 +284,10 @@ public class StripePayment implements PaymentModule {
 			chargeParams.put("source", token); // obtained with Stripe.js
 			chargeParams.put("description", new StringBuilder().append(TRANSACTION).append(" - ").append(store.getStorename()).toString());
 			
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 			
 			
-			Charge ch = Charge.create(chargeParams);
+			Charge ch = Charge.create(chargeParams, requestOptions);
 	
 			//Map<String,String> metadata = ch.getMetadata();
 			
@@ -340,14 +340,14 @@ public class StripePayment implements PaymentModule {
 			//553.47 USD = 55347
 			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
 
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 
-			Charge ch = Charge.retrieve(trnID);
+			Charge ch = Charge.retrieve(trnID, requestOptions);
 
 			Map<String, Object> params = new HashMap<>();
 			params.put("charge", ch.getId());
 			params.put("amount", minorAmount);
-			Refund re = Refund.create(params);
+			Refund re = Refund.create(params, requestOptions);
 
 			transaction = new Transaction();
 			transaction.setAmount(order.getTotal());
@@ -550,5 +550,18 @@ public class StripePayment implements PaymentModule {
 	
 
 
+
+
+	/**
+	 * Per-call options carrying this store's secret key. The module is a singleton shared by
+	 * every MerchantStore, so the key must never be written to the process-wide Stripe.apiKey.
+	 * Timeouts are inherited from the SDK defaults.
+	 */
+	static RequestOptions requestOptions(String apiKey) {
+		return RequestOptions.builder()
+				.setApiKey(apiKey)
+				.setMaxNetworkRetries(2)
+				.build();
+	}
 
 }

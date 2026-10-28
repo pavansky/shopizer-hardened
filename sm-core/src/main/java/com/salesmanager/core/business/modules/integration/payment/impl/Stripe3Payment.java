@@ -23,13 +23,13 @@ import com.salesmanager.core.model.system.IntegrationConfiguration;
 import com.salesmanager.core.model.system.IntegrationModule;
 import com.salesmanager.core.modules.integration.IntegrationException;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
-import com.stripe.Stripe;
 import com.stripe.exception.AuthenticationException;
 import com.stripe.exception.CardException;
 import com.stripe.exception.InvalidRequestException;
 import com.stripe.exception.StripeException;
 import com.stripe.model.PaymentIntent;
 import com.stripe.model.Refund;
+import com.stripe.net.RequestOptions;
 import com.stripe.param.PaymentIntentCaptureParams;
 import com.stripe.param.PaymentIntentCreateParams;
 
@@ -67,7 +67,7 @@ public class Stripe3Payment implements PaymentModule {
 				throw te;
 			}
 
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 
 			PaymentIntentCreateParams createParams = new PaymentIntentCreateParams.Builder()
 					.setCurrency(store.getCurrency().getCode())
@@ -76,7 +76,7 @@ public class Stripe3Payment implements PaymentModule {
 					.build();
 
 			// Create a PaymentIntent with the order amount and currency
-			PaymentIntent intent = PaymentIntent.create(createParams);
+			PaymentIntent intent = PaymentIntent.create(createParams, requestOptions);
 
 			intent.getClientSecret();
 
@@ -169,11 +169,9 @@ public class Stripe3Payment implements PaymentModule {
 				throw te;
 			}
 
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 			
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(
-					token
-			);
+			PaymentIntent paymentIntent = PaymentIntent.retrieve(token, requestOptions);
 			
 			transaction.setAmount(amount);
 			//transaction.setOrder(order);
@@ -229,12 +227,10 @@ public class Stripe3Payment implements PaymentModule {
 
 			long minorAmount = StripeAmounts.toMinorUnits(order.getTotal(), store.getCurrency().getCode());
 
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 
 
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(
-					chargeId
-			);
+			PaymentIntent paymentIntent = PaymentIntent.retrieve(chargeId, requestOptions);
 
 			checkCapturable(paymentIntent, minorAmount);
 
@@ -248,7 +244,7 @@ public class Stripe3Payment implements PaymentModule {
 							)
 					.build();
 
-			paymentIntent = paymentIntent.capture(params);
+			paymentIntent = paymentIntent.capture(params, requestOptions);
 
 			transaction.setAmount(order.getTotal());
 			transaction.setOrder(order);
@@ -315,12 +311,10 @@ public class Stripe3Payment implements PaymentModule {
 			chargeParams.put("description", new StringBuilder().append(TRANSACTION).append(" - ").append(store.getStorename()).toString());
 			*/
 
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 			
 
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(
-					token
-		  	);
+			PaymentIntent paymentIntent = PaymentIntent.retrieve(token, requestOptions);
 
 			checkCapturable(paymentIntent, minorAmount);
 
@@ -334,7 +328,7 @@ public class Stripe3Payment implements PaymentModule {
 							)
 					.build();
 
-			paymentIntent = paymentIntent.capture(params);
+			paymentIntent = paymentIntent.capture(params, requestOptions);
 	
 			//Map<String,String> metadata = ch.getMetadata();
 			
@@ -389,16 +383,14 @@ public class Stripe3Payment implements PaymentModule {
 			//553.47 USD = 55347
 			long minorAmount = StripeAmounts.toMinorUnits(amount, store.getCurrency().getCode());
 
-			Stripe.apiKey = apiKey;
+			RequestOptions requestOptions = requestOptions(apiKey);
 
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(
-					trnID
-			);
+			PaymentIntent paymentIntent = PaymentIntent.retrieve(trnID, requestOptions);
 
 			Map<String, Object> params = new HashMap<>();
 			params.put("payment_intent", paymentIntent.getId());
 			params.put("amount", minorAmount);
-			Refund re = Refund.create(params);
+			Refund re = Refund.create(params, requestOptions);
 
 			transaction = new Transaction();
 			transaction.setAmount(order.getTotal());
@@ -618,5 +610,18 @@ public class Stripe3Payment implements PaymentModule {
 	
 
 
+
+
+	/**
+	 * Per-call options carrying this store's secret key. The module is a singleton shared by
+	 * every MerchantStore, so the key must never be written to the process-wide Stripe.apiKey.
+	 * Timeouts are inherited from the SDK defaults.
+	 */
+	static RequestOptions requestOptions(String apiKey) {
+		return RequestOptions.builder()
+				.setApiKey(apiKey)
+				.setMaxNetworkRetries(2)
+				.build();
+	}
 
 }
