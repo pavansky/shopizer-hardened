@@ -83,6 +83,7 @@ public class ProductOptionValueServiceImpl extends
 	}
 	
 	
+	@Override
 	public void delete(ProductOptionValue entity) throws ServiceException {
 		
 		//remove all attributes having this option
