@@ -10,6 +10,7 @@ import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.HttpClient;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.impl.client.HttpClientBuilder;
@@ -43,10 +44,31 @@ public class CaptchaRequestUtils {
 	
 	  @Value("${config.recaptcha.secretKey}")
 	  private String secretKey;
+
+	  /*
+	   * The client used to be built with no timeouts, so a slow or unreachable
+	   * reCaptcha endpoint held the request thread (and the login/registration
+	   * call) indefinitely. Connect, read and pool-lease timeouts are now bounded.
+	   */
+	  @Value("${config.recaptcha.connectTimeoutMs:3000}")
+	  private int connectTimeoutMs = 3000;
+
+	  @Value("${config.recaptcha.readTimeoutMs:10000}")
+	  private int readTimeoutMs = 10000;
+
+	  static RequestConfig requestConfig(int connectTimeoutMs, int readTimeoutMs) {
+		  return RequestConfig.custom()
+				  .setConnectTimeout(connectTimeoutMs)
+				  .setConnectionRequestTimeout(connectTimeoutMs)
+				  .setSocketTimeout(readTimeoutMs)
+				  .build();
+	  }
 	
 	public boolean checkCaptcha(String gRecaptchaResponse) throws Exception {
 
-		HttpClient client = HttpClientBuilder.create().build();
+		HttpClient client = HttpClientBuilder.create()
+				.setDefaultRequestConfig(requestConfig(connectTimeoutMs, readTimeoutMs))
+				.build();
 	    
 	    String url = configuration.getProperty(ApplicationConstants.RECAPTCHA_URL);;
 

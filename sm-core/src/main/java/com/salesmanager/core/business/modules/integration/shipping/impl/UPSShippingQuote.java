@@ -16,6 +16,7 @@ import org.apache.commons.lang3.Validate;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.ClientProtocolException;
 import org.apache.http.client.ResponseHandler;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
@@ -24,6 +25,7 @@ import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 
 import com.salesmanager.core.business.utils.DataUtils;
 import com.salesmanager.core.model.common.Delivery;
@@ -50,6 +52,30 @@ import com.salesmanager.core.modules.integration.shipping.model.ShippingQuoteMod
 public class UPSShippingQuote implements ShippingQuoteModule {
 	
 	private static final Logger LOGGER = LoggerFactory.getLogger(UPSShippingQuote.class);
+
+	/*
+	 * The default Apache client has no connect or socket timeout, so a stalled
+	 * carrier API blocked checkout threads indefinitely. Timeouts are bounded and
+	 * overridable; field initializers keep them in place if the bean is created
+	 * without property resolution.
+	 */
+	@Value("${config.shipping.ups.connectTimeoutMs:3000}")
+	private int connectTimeoutMs = 3000;
+
+	@Value("${config.shipping.ups.readTimeoutMs:10000}")
+	private int readTimeoutMs = 10000;
+
+	RequestConfig requestConfig() {
+		return RequestConfig.custom()
+				.setConnectTimeout(connectTimeoutMs)
+				.setConnectionRequestTimeout(connectTimeoutMs)
+				.setSocketTimeout(readTimeoutMs)
+				.build();
+	}
+
+	CloseableHttpClient buildHttpClient() {
+		return HttpClients.custom().setDefaultRequestConfig(requestConfig()).build();
+	}
 
 
 	@Override
@@ -378,7 +404,7 @@ public class UPSShippingQuote implements ShippingQuoteModule {
 			LOGGER.debug("UPS QUOTE REQUEST " + xmlbuffer.toString());
 
 
-			try(CloseableHttpClient httpclient = HttpClients.createDefault()) {
+			try(CloseableHttpClient httpclient = buildHttpClient()) {
 			//HttpClient client = new HttpClient();
 			httppost = new HttpPost(protocol + "://" + host + ":" + port
 					+ url);

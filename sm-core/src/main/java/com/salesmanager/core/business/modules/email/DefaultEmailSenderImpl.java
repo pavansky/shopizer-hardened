@@ -7,6 +7,7 @@ import java.io.OutputStream;
 import java.io.StringWriter;
 import java.util.Map;
 import java.util.Properties;
+import javax.annotation.PostConstruct;
 import javax.inject.Inject;
 import javax.mail.BodyPart;
 import javax.mail.Message;
@@ -16,6 +17,7 @@ import javax.mail.internet.InternetAddress;
 import javax.mail.internet.MimeBodyPart;
 import javax.mail.internet.MimeMessage;
 import javax.mail.internet.MimeMultipart;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.MailPreparationException;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
@@ -35,12 +37,71 @@ public class DefaultEmailSenderImpl implements EmailModule {
   private JavaMailSender mailSender;
 
   private static final String CHARSET = "UTF-8";
-  private EmailConfig emailConfig;
+
+  /*
+   * This bean is a singleton shared by every store. The store specific config was
+   * kept in a plain field and copied onto the shared JavaMailSenderImpl on each
+   * send, so two concurrent sends for different stores could deliver with the
+   * other store's host and credentials. The config is now held per thread
+   * (callers set it immediately before send on the same thread) and each send
+   * with a store config uses its own JavaMailSenderImpl instance.
+   */
+  private final ThreadLocal<EmailConfig> emailConfig = new ThreadLocal<>();
+
+  // SMTP timeouts; JavaMail defaults to infinite, which can hang the sending thread.
+  @Value("${config.mail.connectTimeoutMs:3000}")
+  private int connectTimeoutMs = 3000;
+
+  @Value("${config.mail.readTimeoutMs:10000}")
+  private int readTimeoutMs = 10000;
+
+  @Value("${config.mail.writeTimeoutMs:10000}")
+  private int writeTimeoutMs = 10000;
 
   private final static String TEMPLATE_PATH = "templates/email";
 
+  @PostConstruct
+  void applyTimeoutsToDefaultSender() {
+    // applied once at startup, not per send, so the shared sender is never mutated concurrently
+    if (mailSender instanceof JavaMailSenderImpl) {
+      applyTimeouts(((JavaMailSenderImpl) mailSender).getJavaMailProperties(), false);
+    }
+  }
+
+  void applyTimeouts(Properties props, boolean override) {
+    String[][] values = {
+        {"mail.smtp.connectiontimeout", String.valueOf(connectTimeoutMs)},
+        {"mail.smtp.timeout", String.valueOf(readTimeoutMs)},
+        {"mail.smtp.writetimeout", String.valueOf(writeTimeoutMs)}};
+    for (String[] v : values) {
+      if (override || !props.containsKey(v[0])) {
+        props.setProperty(v[0], v[1]);
+      }
+    }
+  }
+
+  /** Builds a dedicated sender for a store specific configuration. */
+  JavaMailSenderImpl buildSender(EmailConfig config) {
+    JavaMailSenderImpl impl = new JavaMailSenderImpl();
+    impl.setProtocol(config.getProtocol());
+    impl.setHost(config.getHost());
+    impl.setPort(Integer.parseInt(config.getPort()));
+    impl.setUsername(config.getUsername());
+    impl.setPassword(config.getPassword());
+    Properties prop = new Properties();
+    prop.put("mail.smtp.auth", String.valueOf(config.isSmtpAuth()));
+    prop.put("mail.smtp.starttls.enable", String.valueOf(config.isStarttls()));
+    applyTimeouts(prop, true);
+    impl.setJavaMailProperties(prop);
+    return impl;
+  }
+
   @Override
   public void send(Email email) throws Exception {
+    final EmailConfig config = emailConfig.get();
+    // clear immediately so a config can never leak to a later send on a pooled thread
+    emailConfig.remove();
+    final JavaMailSender sender = config != null ? buildSender(config) : mailSender;
 
     final String eml = email.getFrom();
     final String from = email.getFromEmail();
@@ -51,21 +112,6 @@ public class DefaultEmailSenderImpl implements EmailModule {
 
     MimeMessagePreparator preparator = new MimeMessagePreparator() {
       public void prepare(MimeMessage mimeMessage) throws MessagingException, IOException {
-
-        JavaMailSenderImpl impl = (JavaMailSenderImpl) mailSender;
-        // if email configuration is present in Database, use the same
-        if (emailConfig != null) {
-          impl.setProtocol(emailConfig.getProtocol());
-          impl.setHost(emailConfig.getHost());
-          impl.setPort(Integer.parseInt(emailConfig.getPort()));
-          impl.setUsername(emailConfig.getUsername());
-          impl.setPassword(emailConfig.getPassword());
-
-          Properties prop = new Properties();
-          prop.put("mail.smtp.auth", emailConfig.isSmtpAuth());
-          prop.put("mail.smtp.starttls.enable", emailConfig.isStarttls());
-          impl.setJavaMailProperties(prop);
-        }
 
         mimeMessage.setRecipient(Message.RecipientType.TO, new InternetAddress(to));
 
@@ -158,7 +204,7 @@ public class DefaultEmailSenderImpl implements EmailModule {
       }
     };
 
-    mailSender.send(preparator);
+    sender.send(preparator);
   }
 
   public Configuration getFreemarkerMailConfiguration() {
@@ -178,11 +224,16 @@ public class DefaultEmailSenderImpl implements EmailModule {
   }
 
   public EmailConfig getEmailConfig() {
-    return emailConfig;
+    return emailConfig.get();
   }
 
+  /** Applies to the next send() on the calling thread only. */
   public void setEmailConfig(EmailConfig emailConfig) {
-    this.emailConfig = emailConfig;
+    if (emailConfig == null) {
+      this.emailConfig.remove();
+    } else {
+      this.emailConfig.set(emailConfig);
+    }
   }
 
 }

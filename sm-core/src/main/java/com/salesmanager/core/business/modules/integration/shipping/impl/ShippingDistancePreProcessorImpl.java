@@ -3,6 +3,7 @@ package com.salesmanager.core.business.modules.integration.shipping.impl;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
@@ -72,6 +73,25 @@ public class ShippingDistancePreProcessorImpl implements ShippingQuotePrePostPro
 	@Value("#{'${config.shippingDistancePreProcessor.acceptedZones}'.split(',')}") 
 	private List<String> allowedZonesCodes = null;
 
+	/*
+	 * GeoApiContext was created with no timeouts, so a slow Google geocode or
+	 * distance matrix call stalled the shipping quote (and checkout) indefinitely.
+	 * Connect and read/write timeouts are now bounded and overridable.
+	 */
+	@Value("${config.shippingDistancePreProcessor.connectTimeoutMs:3000}")
+	private long connectTimeoutMs = 3000;
+
+	@Value("${config.shippingDistancePreProcessor.readTimeoutMs:10000}")
+	private long readTimeoutMs = 10000;
+
+	GeoApiContext buildContext() {
+		return new GeoApiContext()
+				.setApiKey(apiKey)
+				.setConnectTimeout(connectTimeoutMs, TimeUnit.MILLISECONDS)
+				.setReadTimeout(readTimeoutMs, TimeUnit.MILLISECONDS)
+				.setWriteTimeout(readTimeoutMs, TimeUnit.MILLISECONDS);
+	}
+
 
 
 	public List<String> getAllowedZonesCodes() {
@@ -126,7 +146,7 @@ public class ShippingDistancePreProcessorImpl implements ShippingQuotePrePostPro
 		
 		Validate.notNull(apiKey, "Requires the configuration of google apiKey");
 		
-		GeoApiContext context = new GeoApiContext().setApiKey(apiKey);
+		GeoApiContext context = buildContext();
 		
 		//build origin address
 		StringBuilder originAddress = new StringBuilder();
