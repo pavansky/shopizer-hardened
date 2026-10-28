@@ -129,7 +129,10 @@ public class ProductApi {
 		try {
 			// Make sure we have consistency in this request
 			if (!id.equals(product.getId())) {
+				// Stop here: previously the error was written but the product was
+				// still saved, letting a mismatched body overwrite another product.
 				response.sendError(400, "Error url id does not match object id");
+				return;
 			}
 
 			productCommonFacade.saveProduct(merchantStore, product,
@@ -302,7 +305,9 @@ public class ProductApi {
 	 *                   /api/product/123
 	 */
     /**
-	@RequestMapping(value = {"/product/{id}","/products/{id}"}, method = RequestMethod.GET)
+	// Numeric-only id so slug lookups (/product/{friendlyUrl}) are not captured
+	// by this handler and rejected with a conversion error.
+	@RequestMapping(value = {"/product/{id:\\d+}","/products/{id:\\d+}"}, method = RequestMethod.GET)
 	@ApiOperation(httpMethod = "GET", value = "Get a product by id", notes = "For administration and shop purpose. Specifying ?merchant is required otherwise it falls back to DEFAULT")
 	@ApiResponses(value = {
 			@ApiResponse(code = 200, message = "Single product found", response = ReadableProduct.class) })
@@ -359,7 +364,7 @@ public class ProductApi {
 	 *                   <p>
 	 *                   /api/product/123
 	 */
-	@RequestMapping(value = { "/product/{friendlyUrl}",
+	@RequestMapping(value = { "/product/{friendlyUrl:.*\\D.*}",
 			"/product/friendly/{friendlyUrl}" }, method = RequestMethod.GET)
 	@ApiOperation(httpMethod = "GET", value = "Get a product by friendlyUrl (slug)", notes = "For administration and shop purpose. Specifying ?merchant is "
 			+ "required otherwise it falls back to DEFAULT")
@@ -480,7 +485,11 @@ public class ProductApi {
 	 */
 
 	@ResponseStatus(HttpStatus.OK)
-	@RequestMapping(value = { "/private/product/{id}", "/auth/product/{id}" }, method = RequestMethod.PATCH)
+	// PATCH /private/product/{id} is also mapped by the inventory update
+	// above, which made the two handlers ambiguous. Sort order changes are
+	// always sent with ?order=, so require that parameter here; plain PATCH
+	// requests with a body keep going to the inventory update.
+	@RequestMapping(value = { "/private/product/{id}", "/auth/product/{id}" }, method = RequestMethod.PATCH, params = "order")
 	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "String", defaultValue = "DEFAULT"),
 			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
 	@ApiOperation(httpMethod = "POST", value = "Patch product sort order", notes = "Change product sortOrder")

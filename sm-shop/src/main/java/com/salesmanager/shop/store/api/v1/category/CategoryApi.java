@@ -62,7 +62,10 @@ public class CategoryApi {
 	@Inject
 	private UserFacade userFacade;
 
-	@GetMapping(value = "/category/{id}", produces = { APPLICATION_JSON_VALUE })
+	// The id route only matches numeric values so that slugs such as
+	// /category/tables fall through to the friendly URL handler instead of
+	// failing Long conversion with a 500. Numeric ids behave as before.
+	@GetMapping(value = "/category/{id:\\d+}", produces = { APPLICATION_JSON_VALUE })
 	@ApiOperation(httpMethod = "GET", value = "Get category list for an given Category id", notes = "List current Category and child category")
 	@ApiResponses(value = {
 			@ApiResponse(code = 200, message = "List of category found", response = ReadableCategory.class) })
@@ -76,7 +79,8 @@ public class CategoryApi {
 		return category;
 	}
 
-	@GetMapping(value = "/category/{friendlyUrl}", produces = { APPLICATION_JSON_VALUE })
+	// Slug must contain a non-digit, so numeric ids never match both routes.
+	@GetMapping(value = "/category/{friendlyUrl:.*\\D.*}", produces = { APPLICATION_JSON_VALUE })
 	@ApiOperation(httpMethod = "GET", value = "Get category list for an given Category code", notes = "List current Category and child category")
 	@ApiResponses(value = {
 			@ApiResponse(code = 200, message = "List of category found", response = ReadableCategory.class) })

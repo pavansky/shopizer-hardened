@@ -1,5 +1,6 @@
 package com.salesmanager.shop.store.api.v1.product;
 
+import java.security.Principal;
 import java.util.List;
 
 import javax.inject.Inject;
@@ -22,11 +23,14 @@ import com.salesmanager.core.business.services.catalog.product.ProductService;
 import com.salesmanager.core.business.services.catalog.product.review.ProductReviewService;
 import com.salesmanager.core.model.catalog.product.Product;
 import com.salesmanager.core.model.catalog.product.review.ProductReview;
+import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.reference.language.Language;
 import com.salesmanager.shop.constants.Constants;
 import com.salesmanager.shop.model.catalog.product.PersistableProductReview;
 import com.salesmanager.shop.model.catalog.product.ReadableProductReview;
+import com.salesmanager.shop.store.api.exception.UnauthorizedException;
+import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.controller.product.facade.ProductCommonFacade;
 
 import io.swagger.annotations.ApiImplicitParam;
@@ -42,6 +46,32 @@ public class ProductReviewApi {
   @Inject private ProductService productService;
 
   @Inject private ProductReviewService productReviewService;
+
+  @Inject private CustomerFacade customerFacade;
+
+  /**
+   * On customer facing /auth/ routes the reviewer is always the authenticated
+   * customer; any customerId sent in the body is ignored so a customer cannot
+   * post or edit reviews on behalf of someone else. Returns null when the
+   * request is not on an /auth/ route (admin /private/ routes keep accepting
+   * the customerId from the body). Throws when an /auth/ caller cannot be
+   * resolved to a customer of this store.
+   */
+  Long resolveAuthenticatedCustomerId(HttpServletRequest request, MerchantStore merchantStore) {
+    String uri = request.getRequestURI();
+    if (uri == null || !uri.contains("/api/v1/auth/")) {
+      return null;
+    }
+    Principal principal = request.getUserPrincipal();
+    if (principal == null || principal.getName() == null) {
+      throw new UnauthorizedException("Authenticated customer required");
+    }
+    Customer customer = customerFacade.getCustomerByUserName(principal.getName(), merchantStore);
+    if (customer == null) {
+      throw new UnauthorizedException("Authenticated customer required");
+    }
+    return customer.getId();
+  }
 
   private static final Logger LOGGER = LoggerFactory.getLogger(ProductReviewApi.class);
 
@@ -66,6 +96,16 @@ public class ProductReviewApi {
       @ApiIgnore Language language,
       HttpServletRequest request,
       HttpServletResponse response) {
+
+    // Resolved outside the try block so authentication failures surface as 401
+    // instead of being swallowed into a generic 503.
+    Long authCustomerId = resolveAuthenticatedCustomerId(request, merchantStore);
+    if (authCustomerId != null) {
+      review.setCustomerId(authCustomerId);
+    }
+    // The product comes from the path, not the body, so the duplicate check
+    // below looks at the product actually being reviewed.
+    review.setProductId(id);
 
     try {
       // rating already exist
@@ -152,12 +192,14 @@ public class ProductReviewApi {
   })
   public PersistableProductReview update(
       @PathVariable final Long id,
-      @PathVariable final Long reviewId,
+      @PathVariable(name = "reviewid") final Long reviewId,
       @Valid @RequestBody PersistableProductReview review,
       @ApiIgnore MerchantStore merchantStore,
       @ApiIgnore Language language,
       HttpServletRequest request,
       HttpServletResponse response) {
+
+    Long authCustomerId = resolveAuthenticatedCustomerId(request, merchantStore);
 
     try {
       ProductReview prodReview = productReviewService.getById(reviewId);
@@ -166,10 +208,21 @@ public class ProductReviewApi {
         return null;
       }
 
-      if (prodReview.getCustomer().getId().longValue() != review.getCustomerId().longValue()) {
+      // Ownership is checked against the authenticated customer on /auth/
+      // routes; the body customerId is not trusted. A review owned by someone
+      // else (or attached to another product) is reported as not found so its
+      // existence is not disclosed.
+      Long ownerId = authCustomerId != null ? authCustomerId : review.getCustomerId();
+      if (ownerId == null
+          || prodReview.getCustomer() == null
+          || prodReview.getCustomer().getId().longValue() != ownerId.longValue()
+          || prodReview.getProduct() == null
+          || prodReview.getProduct().getId().longValue() != id.longValue()) {
         response.sendError(404, "Product review with id " + reviewId + " does not exist");
         return null;
       }
+      review.setCustomerId(ownerId);
+      review.setId(reviewId);
 
       // rating maximum 5
       if (review.getRating() > Constants.MAX_REVIEW_RATING_SCORE) {
@@ -208,10 +261,13 @@ public class ProductReviewApi {
   })
   public void delete(
       @PathVariable final Long id,
-      @PathVariable final Long reviewId,
+      @PathVariable(name = "reviewid") final Long reviewId,
       @ApiIgnore MerchantStore merchantStore,
       @ApiIgnore Language language,
+      HttpServletRequest request,
       HttpServletResponse response) {
+
+    Long authCustomerId = resolveAuthenticatedCustomerId(request, merchantStore);
 
     try {
       ProductReview prodReview = productReviewService.getById(reviewId);
@@ -221,6 +277,14 @@ public class ProductReviewApi {
       }
 
       if (prodReview.getProduct().getId().longValue() != id.longValue()) {
+        response.sendError(404, "Product review with id " + reviewId + " does not exist");
+        return;
+      }
+
+      // Customers may only delete their own reviews on /auth/ routes.
+      if (authCustomerId != null
+          && (prodReview.getCustomer() == null
+              || prodReview.getCustomer().getId().longValue() != authCustomerId.longValue())) {
         response.sendError(404, "Product review with id " + reviewId + " does not exist");
         return;
       }
