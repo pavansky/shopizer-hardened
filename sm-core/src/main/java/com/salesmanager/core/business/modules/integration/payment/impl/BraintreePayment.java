@@ -3,11 +3,14 @@ package com.salesmanager.core.business.modules.integration.payment.impl;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.braintreegateway.BraintreeGateway;
 import com.braintreegateway.Environment;
@@ -28,6 +31,38 @@ import com.salesmanager.core.modules.integration.IntegrationException;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
 
 public class BraintreePayment implements PaymentModule {
+
+	private static final Logger LOGGER = LoggerFactory.getLogger(BraintreePayment.class);
+
+	/** Braintree statuses meaning the sale was submitted for settlement (funds will be captured) */
+	private static final EnumSet<com.braintreegateway.Transaction.Status> CAPTURED_STATUSES = EnumSet.of(
+			com.braintreegateway.Transaction.Status.SUBMITTED_FOR_SETTLEMENT,
+			com.braintreegateway.Transaction.Status.SETTLING,
+			com.braintreegateway.Transaction.Status.SETTLED,
+			com.braintreegateway.Transaction.Status.SETTLEMENT_PENDING);
+
+	/**
+	 * Builds the Braintree gateway for the given configuration.
+	 * Protected so it can be overridden in tests.
+	 */
+	protected BraintreeGateway gateway(IntegrationConfiguration configuration) {
+
+		String merchantId = configuration.getIntegrationKeys().get("merchant_id");
+		String publicKey = configuration.getIntegrationKeys().get("public_key");
+		String privateKey = configuration.getIntegrationKeys().get("private_key");
+
+		Environment environment= Environment.PRODUCTION;
+		if (configuration.getEnvironment().equals("TEST")) {// sandbox
+			environment= Environment.SANDBOX;
+		}
+
+		return new BraintreeGateway(
+				environment,
+				merchantId,
+				publicKey,
+				privateKey
+				);
+	}
 
 	@Override
 	public void validateModuleConfiguration(IntegrationConfiguration integrationConfiguration, MerchantStore store)
@@ -91,17 +126,7 @@ public class BraintreePayment implements PaymentModule {
 		Validate.notNull(publicKey,"public_key cannot be null");
 		Validate.notNull(privateKey,"private_key cannot be null");
 		
-		Environment environment= Environment.PRODUCTION;
-		if (configuration.getEnvironment().equals("TEST")) {// sandbox
-			environment= Environment.SANDBOX;
-		}
-		
-	    BraintreeGateway gateway = new BraintreeGateway(
-	    		   environment,
-	    		   merchantId,
-	    		   publicKey,
-	    		   privateKey
-				);
+	    BraintreeGateway gateway = gateway(configuration);
 		
 		String clientToken = gateway.clientToken().generate();
 
@@ -142,17 +167,7 @@ public class BraintreePayment implements PaymentModule {
 			throw te;
 	    }
 		
-		Environment environment= Environment.PRODUCTION;
-		if (configuration.getEnvironment().equals("TEST")) {// sandbox
-			environment= Environment.SANDBOX;
-		}
-		
-	    BraintreeGateway gateway = new BraintreeGateway(
-	    		   environment,
-	    		   merchantId,
-	    		   publicKey,
-	    		   privateKey
-				);
+	    BraintreeGateway gateway = gateway(configuration);
 	    
 	   
 
@@ -232,17 +247,7 @@ public class BraintreePayment implements PaymentModule {
 			throw te;
 	    }
 		
-		Environment environment= Environment.PRODUCTION;
-		if (configuration.getEnvironment().equals("TEST")) {// sandbox
-			environment= Environment.SANDBOX;
-		}
-		
-	    BraintreeGateway gateway = new BraintreeGateway(
-	    		   environment,
-	    		   merchantId,
-	    		   publicKey,
-	    		   privateKey
-				);
+	    BraintreeGateway gateway = gateway(configuration);
 	    
 	   
 	    BigDecimal amount = order.getTotal();
@@ -319,31 +324,34 @@ public class BraintreePayment implements PaymentModule {
 			throw te;
 	    }
 		
-		Environment environment= Environment.PRODUCTION;
-		if (configuration.getEnvironment().equals("TEST")) {// sandbox
-			environment= Environment.SANDBOX;
-		}
-		
-	    BraintreeGateway gateway = new BraintreeGateway(
-	    		   environment,
-	    		   merchantId,
-	    		   publicKey,
-	    		   privateKey
-				);
+	    BraintreeGateway gateway = gateway(configuration);
 	    
 	   
 
         TransactionRequest request = new TransactionRequest()
             .amount(amount)
-            .paymentMethodNonce(nonce);
+            .paymentMethodNonce(nonce)
+            .options()
+                .submitForSettlement(true)
+                .done();
 
         Result<com.braintreegateway.Transaction> result = gateway.transaction().sale(request);
 
         String trxId = null;
+        String status = null;
+        TransactionType transactionType = TransactionType.AUTHORIZECAPTURE;
         
         if (result.isSuccess()) {
         	com.braintreegateway.Transaction transaction = result.getTarget();
         	trxId  = transaction.getId();
+        	com.braintreegateway.Transaction.Status trxStatus = transaction.getStatus();
+        	status = trxStatus != null ? trxStatus.name() : null;
+        	if (trxStatus == null || !CAPTURED_STATUSES.contains(trxStatus)) {
+        		//funds are held but not submitted for settlement, keep it capturable
+        		LOGGER.warn("Braintree sale " + trxId + " returned status " + status
+        				+ ", recording as AUTHORIZE so it can be captured");
+        		transactionType = TransactionType.AUTHORIZE;
+        	}
         } else {
             String errorString = "";
             for (ValidationError error : result.getErrors().getAllDeepValidationErrors()) {
@@ -371,10 +379,10 @@ public class BraintreePayment implements PaymentModule {
         Transaction trx = new Transaction();
         trx.setAmount(amount);
         trx.setTransactionDate(new Date());
-        trx.setTransactionType(TransactionType.AUTHORIZECAPTURE);
+        trx.setTransactionType(transactionType);
         trx.setPaymentType(PaymentType.CREDITCARD);
         trx.getTransactionDetails().put("TRANSACTIONID", trxId);
-        trx.getTransactionDetails().put("TRNAPPROVED", null);
+        trx.getTransactionDetails().put("TRNAPPROVED", status);
         trx.getTransactionDetails().put("TRNORDERNUMBER", trxId);
         trx.getTransactionDetails().put("MESSAGETEXT", null);
         
@@ -408,17 +416,7 @@ public class BraintreePayment implements PaymentModule {
 			throw te;
 	    }
 		
-		Environment environment= Environment.PRODUCTION;
-		if (configuration.getEnvironment().equals("TEST")) {// sandbox
-			environment= Environment.SANDBOX;
-		}
-		
-	    BraintreeGateway gateway = new BraintreeGateway(
-	    		   environment,
-	    		   merchantId,
-	    		   publicKey,
-	    		   privateKey
-				);
+	    BraintreeGateway gateway = gateway(configuration);
 	    
 
         Result<com.braintreegateway.Transaction> result = gateway.transaction().refund(auth, amount);
