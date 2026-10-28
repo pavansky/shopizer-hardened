@@ -65,7 +65,9 @@ public class JWTAdminAuthenticationManager extends CustomAuthenticationManager {
       // For simple validation it is completely sufficient to just check the token integrity. You
       // don't have to call
       // the database compellingly. Again it's up to you ;)
-      if (userDetails != null && jwtTokenUtil.validateToken(authToken, userDetails)) {
+      // Only tokens issued to admin users are accepted here; customer tokens are
+      // signed with the same secret and must not grant admin API access.
+      if (userDetails != null && jwtTokenUtil.validateToken(authToken, userDetails, JWTTokenUtil.TOKEN_TYPE_ADMIN)) {
         authentication = new UsernamePasswordAuthenticationToken(userDetails, null,
             userDetails.getAuthorities());
         authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));

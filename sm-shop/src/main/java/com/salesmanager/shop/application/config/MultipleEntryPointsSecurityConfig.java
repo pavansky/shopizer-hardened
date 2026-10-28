@@ -3,8 +3,10 @@ package com.salesmanager.shop.application.config;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
@@ -15,7 +17,9 @@ import org.springframework.security.config.annotation.web.configuration.WebSecur
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.www.BasicAuthenticationEntryPoint;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 
@@ -424,5 +428,91 @@ public class MultipleEntryPointsSecurityConfig {
 	}
 
 
+	/**
+	 * Default chain for every request not claimed by a chain above (/shop/**,
+	 * /services/**, /api/v* /private/**, /api/v* /auth/**).
+	 *
+	 * Without it those requests ran with no security at all, which left mutating
+	 * endpoints such as DELETE /api/v1/products/group/{code} and
+	 * DELETE /api/v1/content/folder open to anonymous callers. Public storefront
+	 * endpoints are now listed explicitly by method and path; everything else is
+	 * denied. Administrative operations belong under /api/v* /private/**.
+	 */
+	@Configuration
+	@Order(Ordered.LOWEST_PRECEDENCE)
+	public static class DefaultSecurityConfigurationAdapter extends WebSecurityConfigurerAdapter {
+
+		@Autowired
+		private AuthenticationTokenFilter authenticationTokenFilter;
+
+		@Autowired
+		private JWTAdminServicesImpl jwtUserDetailsService;
+
+		@Override
+		public void configure(AuthenticationManagerBuilder auth) throws Exception {
+			auth.userDetailsService(jwtUserDetailsService);
+		}
+
+		@Override
+		protected void configure(HttpSecurity http) throws Exception {
+			final String v = API_VERSION;
+			http
+				.csrf().disable()
+				.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+				.and()
+				.exceptionHandling().authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
+				.and()
+				.authorizeRequests()
+					// CORS preflight
+					.antMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+
+					// error page, landing page
+					.antMatchers("/", "/error").permitAll()
+
+					// API documentation
+					.antMatchers(HttpMethod.GET, "/swagger-ui.html", "/swagger-ui/**", "/swagger-resources/**",
+							"/v2/api-docs", "/v3/api-docs/**", "/webjars/**").permitAll()
+
+					// actuator: health and info are public, the rest needs an admin token
+					.antMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+					.antMatchers("/actuator/**").hasRole("AUTH")
+
+					// read-only catalog, content, search, store and reference data
+					.antMatchers(HttpMethod.GET,
+							v + "/product/**", v + "/products/**",
+							v + "/category/**", v + "/manufacturer/**", v + "/manufacturers",
+							v + "/content/**",
+							v + "/store/**", v + "/config",
+							v + "/languages", v + "/country", v + "/zones", v + "/currency", v + "/measures",
+							v + "/shipping/country",
+							v + "/customers/*/reviews",
+							v + "/cart/**",
+							v + "/customer/*/reset/*", v + "/user/*/reset/*").permitAll()
+					.antMatchers(HttpMethod.POST,
+							v + "/search", v + "/search/autocomplete",
+							v + "/product/*/price", v + "/product/*/variation").permitAll()
+
+					// cart and guest checkout
+					.antMatchers(HttpMethod.POST, v + "/cart", v + "/cart/**", v + "/customers/*/cart").permitAll()
+					.antMatchers(HttpMethod.PUT, v + "/cart/*").permitAll()
+					.antMatchers(HttpMethod.DELETE, v + "/cart/*/product/*").permitAll()
+
+					// customer registration, login and password reset
+					.antMatchers(HttpMethod.POST,
+							v + "/customer/register", v + "/customer/login",
+							v + "/customer/password/reset/request", v + "/customer/*/password/*",
+							v + "/user/password/reset/request", v + "/user/*/password/*").permitAll()
+
+					// contact form, newsletter opt-in / opt-out, merchant self sign-up
+					.antMatchers(HttpMethod.POST, v + "/contact", v + "/newsletter", v + "/store/signup").permitAll()
+					.antMatchers(HttpMethod.PUT, v + "/newsletter/*").permitAll()
+					.antMatchers(HttpMethod.DELETE, v + "/newsletter/*").permitAll()
+
+					// anything not listed above is refused
+					.anyRequest().denyAll()
+				.and()
+				.addFilterAfter(authenticationTokenFilter, BasicAuthenticationFilter.class);
+		}
+	}
 
 }

@@ -11,7 +11,6 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
 import org.springframework.web.servlet.handler.HandlerInterceptorAdapter;
 
 public class CorsFilter extends HandlerInterceptorAdapter {
@@ -21,25 +20,16 @@ public class CorsFilter extends HandlerInterceptorAdapter {
 		}
 
 		/**
-		 * Allows public web services to work from remote hosts
+		 * CORS headers are set only by AuthenticationTokenFilter, against the
+		 * configured allow-list (shopizer.cors.allowed-origins). This interceptor
+		 * used to copy any request Origin into Access-Control-Allow-Origin, which
+		 * let any website call the API with the user's credentials. It is kept as
+		 * a no-op so the existing XML and Java registrations stay valid.
 		 */
 	   public boolean preHandle(
 	            HttpServletRequest request,
 	            HttpServletResponse response,
 	            Object handler) throws Exception {
-		   
-        	HttpServletResponse httpResponse = (HttpServletResponse) response;
-        	
-        	String origin = "*";
-        	if(!StringUtils.isBlank(request.getHeader("origin"))) {
-        		origin = request.getHeader("origin");
-        	}
-	
-	        httpResponse.setHeader("Access-Control-Allow-Methods", "POST, GET, PUT, OPTIONS, DELETE, PATCH");
-        	httpResponse.setHeader("Access-Control-Allow-Headers", "X-Auth-Token, Content-Type, Authorization, Cache-Control, X-Requested-With");
-        	httpResponse.setHeader("Access-Control-Allow-Origin", origin);
-	        
         	return true;
-			
 		}
 }

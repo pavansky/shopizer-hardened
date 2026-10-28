@@ -42,10 +42,13 @@ public class JWTAdminAuthenticationProvider extends DaoAuthenticationProvider {
             throw new BadCredentialsException("Username/Password does not match for " + auth.getPrincipal());
         }
         
-        String pass = credentials.toString();
-        String usr = name;
-        
-        if(!passwordMatch(pass, usr)) {
+        if (credentials == null) {
+            throw new BadCredentialsException("Username/Password does not match for " + auth.getPrincipal());
+        }
+
+        // Compare the submitted password with the stored (encoded) password hash.
+        // The previous code compared it with the username.
+        if(!passwordMatch(credentials.toString(), user.getPassword())) {
         	throw new BadCredentialsException("Username/Password does not match for " + auth.getPrincipal());
         }
         
@@ -59,8 +62,8 @@ public class JWTAdminAuthenticationProvider extends DaoAuthenticationProvider {
     }
 	
 	
-    private boolean passwordMatch(String rawPassword, String user) {
-		    return passwordEncoder.matches(rawPassword, user);
+    private boolean passwordMatch(String rawPassword, String encodedPassword) {
+		    return encodedPassword != null && passwordEncoder.matches(rawPassword, encodedPassword);
 	}
 	
     @Override

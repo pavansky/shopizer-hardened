@@ -64,7 +64,8 @@ public class JWTCustomerAuthenticationManager extends CustomAuthenticationManage
 
             // For simple validation it is completely sufficient to just check the token integrity. You don't have to call
             // the database compellingly. Again it's up to you ;)
-            if (userDetails != null && jwtTokenUtil.validateToken(authToken, userDetails)) {
+            // Only tokens issued to customers are accepted on the customer API.
+            if (userDetails != null && jwtTokenUtil.validateToken(authToken, userDetails, JWTTokenUtil.TOKEN_TYPE_CUSTOMER)) {
                 authentication = new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
                 authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                 logger.info("authenticated user " + username + ", setting security context");

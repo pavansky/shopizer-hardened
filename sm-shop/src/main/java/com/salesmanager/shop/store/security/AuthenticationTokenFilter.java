@@ -1,6 +1,10 @@
 package com.salesmanager.shop.store.security;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.Enumeration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -40,6 +44,14 @@ public class AuthenticationTokenFilter extends OncePerRequestFilter {
     
 
     
+    /**
+     * Origins allowed to make credentialed cross-origin calls, comma separated.
+     */
+    @Value("${shopizer.cors.allowed-origins:http://localhost:3000,http://localhost:4200}")
+    private String allowedOriginsProperty;
+
+    private volatile Set<String> allowedOrigins;
+
     @Inject
     private CustomAuthenticationManager jwtCustomCustomerAuthenticationManager;
     
@@ -50,15 +62,17 @@ public class AuthenticationTokenFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws ServletException, IOException {
         
 
-    	String origin = "*";
-    	if(!StringUtils.isBlank(request.getHeader("origin"))) {
-    		origin = request.getHeader("origin");
+    	// CORS: only echo the Origin back (with credentials) when it is on the
+    	// configured allow-list. Reflecting any Origin with credentials would let
+    	// any web site make authenticated calls on behalf of a logged-in user.
+    	String origin = request.getHeader("origin");
+    	response.addHeader("Vary", "Origin");
+    	if(!StringUtils.isBlank(origin) && isAllowedOrigin(origin)) {
+    		response.setHeader("Access-Control-Allow-Methods", "POST, GET, PUT, OPTIONS, DELETE, PATCH");
+    		response.setHeader("Access-Control-Allow-Origin", origin);
+    		response.setHeader("Access-Control-Allow-Headers", "X-Auth-Token, Content-Type, Authorization, Cache-Control, X-Requested-With");
+    		response.setHeader("Access-Control-Allow-Credentials", "true");
     	}
-    	//in flight
-    	response.setHeader("Access-Control-Allow-Methods", "POST, GET, PUT, OPTIONS, DELETE, PATCH");
-    	response.setHeader("Access-Control-Allow-Origin", origin);
-    	response.setHeader("Access-Control-Allow-Headers", "X-Auth-Token, Content-Type, Authorization, Cache-Control, X-Requested-With");
-    	response.setHeader("Access-Control-Allow-Credentials", "true");
 
     	try {
     		
@@ -96,7 +110,10 @@ public class AuthenticationTokenFilter extends OncePerRequestFilter {
     	}
  
     	
-    	if(requestUrl.contains("/api/v1/private") || requestUrl.contains("/api/v2/private")) {
+    	// Actuator endpoints (other than health/info) require an admin token, so
+    	// the admin token is resolved for them as well.
+    	if(requestUrl.contains("/api/v1/private") || requestUrl.contains("/api/v2/private")
+    			|| request.getRequestURI().startsWith(request.getContextPath() + "/actuator/")) {
     		
     		//setHeader(request,response);  
     		
@@ -126,6 +143,30 @@ public class AuthenticationTokenFilter extends OncePerRequestFilter {
     }
     
     
+    boolean isAllowedOrigin(String origin) {
+    	Set<String> origins = allowedOrigins;
+    	if (origins == null) {
+    		origins = parseOrigins(allowedOriginsProperty);
+    		allowedOrigins = origins;
+    	}
+    	return origins.contains(origin.trim());
+    }
+
+    static Set<String> parseOrigins(String value) {
+    	if (StringUtils.isBlank(value)) {
+    		return Collections.emptySet();
+    	}
+    	return Arrays.stream(value.split(","))
+    			.map(String::trim)
+    			.filter(o -> !o.isEmpty())
+    			.collect(Collectors.toSet());
+    }
+
+    void setAllowedOriginsProperty(String value) {
+    	this.allowedOriginsProperty = value;
+    	this.allowedOrigins = null;
+    }
+
     private void postFilter(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws ServletException, IOException {
     	
     	try {
