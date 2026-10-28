@@ -509,11 +509,12 @@ public class SearchServiceImpl implements com.salesmanager.core.business.service
 	}
 	
 	public String loadClassPathResource(String file) throws Exception {
+		// Read as a stream: inside a packaged jar the resource is not a file,
+		// so getFile() fails and search could never start from the jar.
 		Resource res = new ClassPathResource(file);
-		File f = res.getFile();
-		
-		return new String(
-			      Files.readAllBytes(f.toPath()));
+		try (java.io.InputStream in = res.getInputStream()) {
+			return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+		}
 	}
 
 }
