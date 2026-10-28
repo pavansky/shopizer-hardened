@@ -34,7 +34,7 @@ public class OrderProduct extends SalesManagerEntity<Long, OrderProduct> {
 	@Column (name="PRODUCT_SKU")
 	private String sku;
 
-	@Column (name="PRODUCT_NAME" , length=64 , nullable=false)
+	@Column (name="PRODUCT_NAME" , length=120 , nullable=false)
 	private String productName;
 
 	@Column (name="PRODUCT_QUANTITY")
