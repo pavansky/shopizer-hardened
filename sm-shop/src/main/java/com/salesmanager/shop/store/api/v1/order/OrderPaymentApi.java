@@ -45,6 +45,7 @@ import com.salesmanager.shop.model.order.transaction.ReadableTransaction;
 import com.salesmanager.shop.model.order.v0.ReadableOrderList;
 import com.salesmanager.shop.populator.order.transaction.PersistablePaymentPopulator;
 import com.salesmanager.shop.populator.order.transaction.ReadableTransactionPopulator;
+import com.salesmanager.shop.store.api.exception.NotImplementedException;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.controller.order.facade.OrderFacade;
 import com.salesmanager.shop.utils.AuthorizationUtils;
@@ -234,7 +235,7 @@ public class OrderPaymentApi {
 	 * @throws Exception
 	 */
 	@RequestMapping(value = { "/private/orders/payment/capturable" }, method = RequestMethod.GET)
-	@ResponseStatus(HttpStatus.ACCEPTED)
+	@ResponseStatus(HttpStatus.OK)
 	@ResponseBody
 	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "String", defaultValue = "DEFAULT"),
 			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
@@ -321,7 +322,7 @@ public class OrderPaymentApi {
 		 * e.getMessage()); } catch (Exception ignore) { } return null; }
 		 */
 
-		return null;
+		throw new NotImplementedException("Payment capture is not implemented");
 	}
 
 	/**
@@ -339,24 +340,6 @@ public class OrderPaymentApi {
 			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
 	public ReadableTransaction refundPayment(@PathVariable Long id, @ApiIgnore MerchantStore merchantStore,
 			@ApiIgnore Language language) {
-		return null;
-	}
-
-	/**
-	 * Capture payment
-	 * 
-	 * @param id
-	 * @param merchantStore
-	 * @param language
-	 * @return
-	 */
-	@RequestMapping(value = { "/private/orders/{id}/authorize" }, method = RequestMethod.POST)
-	@ResponseStatus(HttpStatus.OK)
-	@ResponseBody
-	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "String", defaultValue = "DEFAULT"),
-			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
-	public ReadableTransaction authorizePayment(@PathVariable Long id, @ApiIgnore MerchantStore merchantStore,
-			@ApiIgnore Language language) {
-		return null;
+		throw new NotImplementedException("Payment refund is not implemented");
 	}
 }

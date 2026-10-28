@@ -1,6 +1,5 @@
 package com.salesmanager.shop.store.api.exception;
 
-import java.util.Objects;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -26,8 +25,7 @@ public class RestErrorHandler {
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public @ResponseBody ErrorEntity handleServiceException(Exception exception) {
         log.error(exception.getMessage(), exception);
-        Objects.requireNonNull(exception.getCause());
-        Throwable rootCause = exception.getCause();
+        Throwable rootCause = exception;
         while (rootCause.getCause() != null && rootCause.getCause() != rootCause) {
             rootCause = rootCause.getCause();
         }
@@ -45,7 +43,7 @@ public class RestErrorHandler {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public @ResponseBody ErrorEntity handleServiceException(ServiceRuntimeException exception) {
         log.error(exception.getErrorMessage(), exception);
-        Throwable rootCause = exception.getCause();
+        Throwable rootCause = exception;
         while (rootCause.getCause() != null && rootCause.getCause() != rootCause) {
             rootCause = rootCause.getCause();
         }
@@ -91,6 +89,17 @@ public class RestErrorHandler {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public @ResponseBody ErrorEntity handleRestApiException(RestApiException exception) {
         log.error(exception.getErrorMessage(), exception);
+
+        ErrorEntity errorEntity = createErrorEntity(exception.getErrorCode(), exception.getErrorMessage(),
+                exception.getLocalizedMessage());
+        return errorEntity;
+    }
+
+    @RequestMapping(produces = "application/json")
+    @ExceptionHandler(NotImplementedException.class)
+    @ResponseStatus(HttpStatus.NOT_IMPLEMENTED)
+    public @ResponseBody ErrorEntity handleNotImplementedException(NotImplementedException exception) {
+        log.warn(exception.getErrorMessage());
 
         ErrorEntity errorEntity = createErrorEntity(exception.getErrorCode(), exception.getErrorMessage(),
                 exception.getLocalizedMessage());
