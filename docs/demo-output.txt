@@ -1,0 +1,14 @@
+== Default access
+anonymous DELETE /api/v1/products/group/x  -> 401   (3.2.7: 200)
+anonymous POST  /actuator/loggers/ROOT     -> 401   (3.2.7: 204)
+== Admin login (token carries token_type=admin)
+== Catalog setup
+category by slug /api/v1/category/furniture -> 200   (3.2.7: 500)
+== Checkout with Idempotency-Key
+first attempt : HTTP 200 order id 1 
+retry, same key: HTTP 200 order id 1 
+same key, other cart: HTTP 409 order id - Idempotency-Key was already used for a different cart
+== Orders recorded
+ order 1 ORDERED
+stock left for oak-bench (started at 5):
+ quantity 4

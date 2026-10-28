@@ -1,148 +1,98 @@
-# Shopizer 3 (for java 17 +) (tested with Java 11, 17)
+# Shopizer, hardened
 
-3.2.7
+A fork of [Shopizer 3.2.7](https://github.com/shopizer-ecommerce/shopizer) (Java 11, Spring Boot 2.5) that fixes the defects a multi-tenant merchant would hit first: money that is never collected, data that leaks between stores, endpoints that are open by default, and calls that hang forever.
 
+The architecture is kept on purpose. This is the same modular monolith, with correct money handling, safe defaults and fast failure.
 
+[![ci](https://github.com/pavansky/shopizer-hardened/actions/workflows/ci.yml/badge.svg)](https://github.com/pavansky/shopizer-hardened/actions/workflows/ci.yml)
 
-[![last_version](https://img.shields.io/badge/last_version-v3.2.7-blue.svg?style=flat)](https://github.com/shopizer-ecommerce/shopizer/tree/3.2.7)
-[![Official site](https://img.shields.io/website-up-down-green-red/https/shields.io.svg?label=official%20site)](http://www.shopizer.com/)
-[![Docker Pulls](https://img.shields.io/docker/pulls/shopizerecomm/shopizer.svg)](https://hub.docker.com/r/shopizerecomm/shopizer)
-[![stackoverflow](https://img.shields.io/badge/shopizer-stackoverflow-orange.svg?style=flat)](http://stackoverflow.com/questions/tagged/shopizer)
-[![CircleCI](https://circleci.com/gh/shopizer-ecommerce/shopizer.svg?style=svg)](https://circleci.com/gh/shopizer-ecommerce/shopizer)
+## What changed, in one table
 
+| Area | 3.2.7 | This fork |
+|---|---|---|
+| Braintree | Default sale only authorises. Merchant is never paid | Sale settles. Real gateway status recorded |
+| Stripe | Totals of 1,000 or more fail. Yen charged 100x. Key in a global static | Minor units per currency. Key per request |
+| Checkout | Charge first, insert order after. Retries charge twice | Order saved as `PAYMENT_PENDING`, then charged. `Idempotency-Key` supported |
+| Stock | Oversell check commented out | Conditional decrement before charging |
+| Order status | Any change allowed | Explicit transition table, 409 on illegal moves |
+| Store isolation | SKU queries drop the store filter | Every SKU query scoped to the caller's store |
+| Tokens | One secret `aSecret`, 7 days, admin and customer interchangeable | `JWT_SECRET` 64+ bytes, 1 hour, typed tokens |
+| Default access | Unlisted paths unauthenticated. All actuator endpoints public | Deny by default. Only health and info public |
+| Outbound calls | No timeouts. Thread per event | 3 s / 10 s timeouts. Bounded pools, graceful shutdown |
+| Schema | `hbm2ddl update` | Flyway migrations, `validate` in production profiles |
+| Delivery | Root Docker image. CI pushes from every branch | Non-root image with health check. CI runs `mvn verify` |
 
-Java open source e-commerce software
+Every row links to a defect with file and line in [docs/FIXES.md](docs/FIXES.md).
 
-Headless commerce and Rest api for ecommerce
+## Read in this order
 
-- Catalog
-- Shopping cart
-- Checkout
-- Merchant
-- Order
-- Customer
-- User
+1. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): before and after diagrams for security, checkout, payments and runtime.
+2. [docs/FIXES.md](docs/FIXES.md): the 30 defects, where they were, the effect, the fix and the test.
+3. [docs/adr](docs/adr): one page per design decision, including what was kept and why.
+4. The commit history: one commit per fix, on top of the tag `baseline-3.2.7`.
 
-Shopizer Headless commerce consists of the following components:
-
-
-Access the headless api: http://localhost:8080/swagger-ui.html
-
-
-See the demo: [**New demo on the way 2025]
--------------------
-Headless demo Available soon
-
-1.  Run from Docker images:
-
-From the command line:
-
-```
-docker run -p 8080:8080 shopizerecomm/shopizer:latest
-```
-       
-2. Run the administration tool
-
-⋅⋅⋅ Requires the java backend to be running
-
-```
-docker run \
- -e "APP_BASE_URL=http://localhost:8080/api" \
- -p 82:80 shopizerecomm/shopizer-admin
+```bash
+git log --oneline baseline-3.2.7..main
+git diff baseline-3.2.7 -- sm-core/src/main/java/com/salesmanager/core/business/modules/integration/payment/impl/BraintreePayment.java
 ```
 
+## Build and run
 
-3. Run react shop sample site
+Requires JDK 11 and Maven 3.8+, or Docker.
 
-⋅⋅⋅ Requires the java backend to be running
-
-```
-docker run \
- -e "APP_MERCHANT=DEFAULT"
- -e "APP_BASE_URL=http://localhost:8080"
- -p 80:80 shopizerecomm/shopizer-shop-reactjs
+```bash
+mvn -B verify
 ```
 
-API documentation:
--------------------
+```bash
+cd sm-shop && mvn spring-boot:run
+```
 
+The default profile uses an embedded H2 database and needs no setup. The API listens on port 8080. Swagger UI is at `/swagger-ui.html`.
 
-Get the source code:
--------------------
-Clone the repository:
-     
-	 $ git clone git://github.com/shopizer-ecommerce/shopizer.git
-	 
+For MySQL, run with the `mysql` profile. Flyway creates or upgrades the schema and Hibernate only validates it.
 
-To build the application:
--------------------
+| Variable | Purpose | Default |
+|---|---|---|
+| `JWT_SECRET` | HS512 signing key, 64+ bytes | Development value, logs a warning |
+| `JWT_EXPIRATION_SECONDS` | Access token lifetime | 3600 |
+| `CORS_ALLOWED_ORIGINS` | Storefront and admin origins | `http://localhost:3000,http://localhost:4200` |
 
-1. Shopizer backend
+## Check the fixes yourself
 
+Start the app, then run the end-to-end demo. It sets up a product, checks the security defaults, and checks out twice with the same `Idempotency-Key`. Recorded output is in [docs/demo-output.txt](docs/demo-output.txt).
 
-From the command line:
+```bash
+scripts/demo-checkout.sh http://localhost:8080
+```
 
-	$ cd shopizer
-	$ mvnw clean install
-	$ cd sm-shop
-	$ mvnw spring-boot:run
+Or check single defects by hand:
 
-2. Shopizer admin
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/api/v1/products/group/x
+```
 
-Form compiling and running Shopizer admin consult the repo README file
+That returned 200 on 3.2.7 and now returns 401.
 
-3. Shop sample site
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/api/v1/category/tables
+```
 
-Form compiling and running Shopizer admin consult the repo README file
+That returned 500 on 3.2.7 and now resolves the slug.
 
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/actuator/loggers/ROOT -H 'Content-Type: application/json' -d '{"configuredLevel":"OFF"}'
+```
 
-### Access the application:
--------------------
+That returned 204 on 3.2.7 and now returns 401.
 
-Access the headless web application at: http://localhost:8080/swagger-ui.html
+## Known limits
 
+- **Reconciliation.** Orders left in `PAYMENT_PENDING` after a crash are kept for reconciliation. A scheduled job to resolve them is the next step.
+- **Refunds.** Capture and refund return 501 until they are implemented against each gateway.
+- **Frontends.** The React storefront and Angular admin live in separate repositories. Their matching fixes, such as the Braintree admin form values, are listed in FIXES.md.
+- **Spring Boot 3.** The upgrade is deliberately deferred. See [ADR 0008](docs/adr/0008-defer-the-spring-boot-upgrade.md).
 
-The instructions above will let you run the application with default settings and configurations.
-Please read the instructions on how to connect to MySQL, configure an email server and configure other subsystems
+## License and credit
 
-
-### Documentation:
--------------------
-
-Documentation available [<https://shopizer-ecommerce.github.io/documentation/>](http://localhost:8080/swagger-ui/index.html)
-
-ChatOps <https://shopizer.slack.com>  - Join our Slack channel <https://communityinviter.com/apps/shopizer/shopizer>
-
-More information is available on shopizer web site here <http://www.shopizer.com>
-
-### Participation:
--------------------
-
-If you have interest in giving feedback or for participating to Shopizer project in any way
-Feel to use the contact form <http://www.shopizer.com/contact.html> and share your email address
-so we can send an invite to our Slack channel
-
-### How to Contribute:
--------------------
-Fork the repository to your GitHub account
-
-Clone from fork repository
--------------------
-
-       $ git clone https://github.com/yourusername/shopizer.git
-
-Build application according to steps provided above
-
-
-Create new branch in your repository
--------------------
-
-	   $ git checkout -b branch-name
-
-
-Push your changes to Shopizer
--------------------
-
-Please open a PR (pull request) in order to have your changes merged to the upstream
-
-
+Shopizer is by the Shopizer team and is licensed under the Apache License 2.0; see [LICENSE.md](LICENSE.md). The original README is kept at [docs/UPSTREAM-README.md](docs/UPSTREAM-README.md). Changes in this fork are by Pavan Kumar Guthikonda under the same license.
