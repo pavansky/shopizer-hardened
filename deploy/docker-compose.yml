@@ -43,6 +43,13 @@ services:
         -Dconfig.reconciliation.pendingOrders.graceMinutes=${RECONCILE_GRACE_MINUTES:-15}
         -Dconfig.reconciliation.pendingOrders.delayMs=${RECONCILE_DELAY_MS:-300000}
       STRIPE_TEST_SECRET_KEY: ${STRIPE_TEST_SECRET_KEY:-}
+      # order emails go to Mailpit; open http://localhost:8025 to read them
+      EMAIL_SENDER: default
+      SMTP_PROTOCOL: smtp
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_AUTH: "false"
+      SMTP_STARTTLS: "false"
     ports: [ "${API_PORT:-8080}:8080" ]
     volumes: [ "cms-files:/files" ]
     restart: unless-stopped
@@ -68,8 +75,9 @@ services:
     build: { context: "${STOREFRONT_DIR:-../../shopizer-shop-hardened}", dockerfile: Dockerfile }
     image: shopizer-storefront:local
     environment:
-      APP_BASE_URL: http://localhost:${API_PORT:-8080}
+      APP_API_URL: http://localhost:${API_PORT:-8080}/api
       APP_MERCHANT: DEFAULT
+      APP_PAYMENT_TYPE: ${STOREFRONT_PAYMENT_TYPE:-MONEYORDER}
       APP_STRIPE_KEY: ${STRIPE_TEST_PUBLISHABLE_KEY:-}
     ports: [ "${STOREFRONT_PORT:-3000}:80" ]
     depends_on: [api]
@@ -89,6 +97,13 @@ services:
       - "./backup/backup.sh:/backup.sh:ro"
       - "./backup/dumps:/dumps"
     entrypoint: ["sh", "/backup.sh"]
+    restart: unless-stopped
+    logging: *logging
+    networks: [backend]
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports: [ "${MAILPIT_PORT:-8025}:8025" ]
     restart: unless-stopped
     logging: *logging
     networks: [backend]

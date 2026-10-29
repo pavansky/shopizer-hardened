@@ -11,7 +11,7 @@ while true; do
   if mysqldump -h db -u root --single-transaction --routines --triggers --set-gtid-purged=OFF \
        --databases SALESMANAGER | gzip -9 > "$tmp"; then
     mv "$tmp" "/dumps/SALESMANAGER-$ts.sql.gz"
-    sha256sum "/dumps/SALESMANAGER-$ts.sql.gz" > "/dumps/SALESMANAGER-$ts.sql.gz.sha256"
+    (cd /dumps && sha256sum "SALESMANAGER-$ts.sql.gz" > "SALESMANAGER-$ts.sql.gz.sha256")
     echo "backup ok $ts $(du -h /dumps/SALESMANAGER-$ts.sql.gz | cut -f1)"
   else
     rm -f "$tmp"; echo "backup FAILED $ts" >&2
