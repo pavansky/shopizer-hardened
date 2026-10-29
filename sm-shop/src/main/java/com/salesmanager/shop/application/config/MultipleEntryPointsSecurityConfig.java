@@ -44,6 +44,16 @@ import com.salesmanager.shop.store.security.services.CredentialsServiceImpl;
 @EnableWebSecurity
 public class MultipleEntryPointsSecurityConfig {
 
+	/**
+	 * URLs rejected by the firewall (for example a "//" from an empty path variable)
+	 * are client errors. Without this they surface as 500 and page the on-call.
+	 */
+	@org.springframework.context.annotation.Bean
+	public org.springframework.security.web.firewall.RequestRejectedHandler requestRejectedHandler() {
+		return new org.springframework.security.web.firewall.HttpStatusRequestRejectedHandler();
+	}
+
+
 	private static final String API_VERSION = "/api/v*";
 
 	@Bean
