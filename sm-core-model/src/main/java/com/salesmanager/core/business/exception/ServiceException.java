@@ -28,8 +28,14 @@ public class ServiceException extends Exception {
 		super();
 	}
 	
+	/**
+	 * Most callers pass a human-readable message here, not a message key. It used
+	 * to be stored only as messageCode, so getMessage() returned null and errors
+	 * surfaced as "ServiceException: null". It is now also the exception message;
+	 * messageCode keeps its old value for callers that read it.
+	 */
 	public ServiceException(String messageCode) {
-		super();
+		super(messageCode);
 		this.messageCode = messageCode;
 	}
 
