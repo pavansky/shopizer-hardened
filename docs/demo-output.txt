@@ -8,7 +8,12 @@ category by slug /api/v1/category/furniture -> 200   (3.2.7: 500)
 first attempt : HTTP 200 order id 1 
 retry, same key: HTTP 200 order id 1 
 same key, other cart: HTTP 409 order id - Idempotency-Key was already used for a different cart
+== Refunds (order 1, total 249.00)
+partial 100.00     : HTTP 200 REFUND CA$100.00 
+over-refund 200.00 : HTTP 400   Refund amount must be greater than 0 and at most 149.00, was 200.00
+remaining (no body): HTTP 200 REFUND CA$149.00 
+nothing left       : HTTP 409   Order id [1] is already fully refunded
 == Orders recorded
- order 1 ORDERED
+ order 1 REFUNDED
 stock left for oak-bench (started at 5):
  quantity 4

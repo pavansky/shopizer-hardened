@@ -38,6 +38,14 @@ echo "first attempt : $(checkout "$CART" demo-key-1)"
 echo "retry, same key: $(checkout "$CART" demo-key-1)"
 echo "same key, other cart: $(checkout "$(newcart)" demo-key-1)"
 
+echo "== Refunds (order 1, total 249.00)"
+refund() { curl -s -w '\n%{http_code}' -X POST "$API/v1/private/orders/1/refund" -H "$AUTH" -H "$J" -d "$1" \
+  | python3 -c "import sys,json;b,c=sys.stdin.read().rsplit('\n',1);d=json.loads(b) if b.strip() else {};print('HTTP',c,d.get('transactionType',''),d.get('amount',''),d.get('message',''))"; }
+echo "partial 100.00     : $(refund '{"amount":100.00}')"
+echo "over-refund 200.00 : $(refund '{"amount":200.00}')"
+echo "remaining (no body): $(refund '{}')"
+echo "nothing left       : $(refund '{}')"
+
 echo "== Orders recorded"
 curl -s "$API/v1/private/orders?count=20" -H "$AUTH" | python3 -c "import sys,json;d=json.load(sys.stdin);[print(' order',o['id'],o.get('orderStatus')) for o in d.get('orders',[])]"
 echo "stock left for oak-bench (started at 5):"
