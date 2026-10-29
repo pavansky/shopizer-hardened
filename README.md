@@ -15,6 +15,8 @@ The architecture is kept on purpose. This is the same modular monolith, with cor
 | Checkout | Charge first, insert order after. Retries charge twice | Order saved as `PAYMENT_PENDING`, then charged. `Idempotency-Key` supported |
 | Stock | Oversell check commented out | Conditional decrement before charging |
 | Order status | Any change allowed | Explicit transition table, 409 on illegal moves |
+| Capture and refund | Returned 200 and did nothing | Real operations: store-scoped, amount-checked, row-locked, recorded as REFUND |
+| Stuck orders | Left in limbo | Scheduled reconciler finalises or fails them and returns stock |
 | Store isolation | SKU queries drop the store filter | Every SKU query scoped to the caller's store |
 | Tokens | One secret `aSecret`, 7 days, admin and customer interchangeable | `JWT_SECRET` 64+ bytes, 1 hour, typed tokens |
 | Default access | Unlisted paths unauthenticated. All actuator endpoints public | Deny by default. Only health and info public |
@@ -27,7 +29,7 @@ Every row links to a defect with file and line in [docs/FIXES.md](docs/FIXES.md)
 ## Read in this order
 
 1. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): before and after diagrams for security, checkout, payments and runtime.
-2. [docs/FIXES.md](docs/FIXES.md): the 30 defects, where they were, the effect, the fix and the test.
+2. [docs/FIXES.md](docs/FIXES.md): the 36 defects, where they were, the effect, the fix and the test.
 3. [docs/adr](docs/adr): one page per design decision, including what was kept and why.
 4. The commit history: one commit per fix, on top of the tag `baseline-3.2.7`.
 
@@ -86,11 +88,13 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/actuator/
 
 That returned 204 on 3.2.7 and now returns 401.
 
-## Known limits
+## Companion repository
 
-- **Reconciliation.** Orders left in `PAYMENT_PENDING` after a crash are kept for reconciliation. A scheduled job to resolve them is the next step.
-- **Refunds.** Capture and refund return 501 until they are implemented against each gateway.
-- **Frontends.** The React storefront and Angular admin live in separate repositories. Their matching fixes, such as the Braintree admin form values, are listed in FIXES.md.
+The Angular admin fixes live in [pavansky/shopizer-admin-hardened](https://github.com/pavansky/shopizer-admin-hardened): valid Braintree transaction types, safe retries, the 0-based orders pager, store-aware password reset, a working runtime config and a reproducible build.
+
+## Design limits, on purpose
+
+- **Payment record lost in a crash.** If the process dies after the gateway charges but before the payment record commits, the reconciler cannot see the payment and marks the order failed. Closing that needs a gateway lookup per module. The reconciler logs every decision and counts it at `/actuator/prometheus`, so these cases show up.
 - **Spring Boot 3.** The upgrade is deliberately deferred. See [ADR 0008](docs/adr/0008-defer-the-spring-boot-upgrade.md).
 
 ## License and credit

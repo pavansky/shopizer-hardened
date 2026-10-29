@@ -9,7 +9,7 @@ Each row is a defect found in Shopizer 3.2.7 (commit 6a4a0a6, tagged `baseline-3
 | 1 | Braintree sale sent without `submitForSettlement` | `BraintreePayment.java:336` | Default checkout only authorises; funds released after about a week, merchant never paid | Sale submits for settlement; real status stored in `TRNAPPROVED`; admin form values corrected | `BraintreePaymentTest` |
 | 2 | Stripe amount built by deleting "." from a `Locale.US` formatted string | `Stripe3Payment.java:320`, `StripePayment.java` | Totals of 1,000 or more fail; zero-decimal currencies (JPY) charged 100x | `StripeAmounts.toMinorUnits(BigDecimal, currency)` from Stripe's currency table | `StripeAmountsTest` |
 | 3 | Stripe secret key written to the process-wide `Stripe.apiKey` | `Stripe3Payment.java:77` | Concurrent checkouts in two stores can run under the other store's key | `RequestOptions` per call with the store's key | `StripeRequestOptionsTest` |
-| 4 | Capture and refund endpoints return `null` with HTTP 200 | `OrderPaymentApi.java:342` | Admin shows "refunded successfully" while nothing happens | 501 Not Implemented with an error body; null-cause NPE in the error handler fixed | `OrderPaymentStubIntegrationTest` |
+| 4 | Capture and refund endpoints return `null` with HTTP 200 | `OrderPaymentApi.java:342` | Admin shows "refunded successfully" while nothing happens | Real capture and refund: admin role, store-scoped lookup, amount in (0, remaining], 409 when exhausted, order row locked for the whole operation, REFUNDED on full refund | `OrderFacadePaymentTest`, `PaymentServiceRefundTest`, demo script |
 | 5 | Payment charged before the order row exists | `OrderServiceImpl.java:147` | Any failure after the charge leaves the customer charged with no order | Order saved as `PAYMENT_PENDING` in its own transaction, then charged, then finalised with a compare-and-set or marked `PAYMENT_FAILED`. `processOrder` runs outside the XML transaction advisor so each step commits on its own | `OrderServiceImplCheckoutTest` |
 | 6 | No idempotency on checkout | `OrderApi.java:343,402` | A retried request charges twice | Optional `Idempotency-Key` header, stored with a unique constraint; replay returns the original order, mismatch returns 409 | `OrderFacadeIdempotencyAndStatusTest` |
 | 7 | Oversell check commented out; stock looked up by the order line id | `OrderServiceImpl.java:197-203` | Stock goes negative; wrong product decremented | Conditional `UPDATE ... WHERE quantity >= :q` before charging | `OrderServiceImplCheckoutTest` |
@@ -52,17 +52,31 @@ Each row is a defect found in Shopizer 3.2.7 (commit 6a4a0a6, tagged `baseline-3
 | 29 | Search mapping read with `ClassPathResource.getFile()` | `SearchServiceImpl.java:513` | Search cannot start from the packaged jar | Read as a stream | MySQL profile boot |
 | 30 | Default profile needs a `database.properties` that is git-ignored | `.gitignore`, `shopizer-core-config.xml:85` | A fresh clone cannot start | Committed H2 file-database default | Fresh-clone boot |
 
+## Gaps closed in the second pass
+
+| # | Defect | Where | Effect | Fix | Test |
+|---|---|---|---|---|---|
+| 31 | Stripe refunds recorded as CAPTURE for the full order total with a null gateway id | `Stripe3Payment.java:423`, `StripePayment.java` | Ledger says money was taken when it was returned | REFUND entry with the actual amount and the Stripe refund id | `Stripe3RefundTest` |
+| 32 | Braintree refund called on unsettled transactions | `BraintreePayment.refund` | Gateway rejects the refund | Void when authorised or submitted, refund when settled | `BraintreeRefundTest` |
+| 33 | Ledger "last transaction" chosen alphabetically by type | `TransactionServiceImpl.java:104` | Already-captured authorisations offered for capture again | Ordered by creation time, then id | `TransactionServiceOrderingTest` |
+| 34 | Orders stuck in `PAYMENT_PENDING` after a crash | checkout | Stock held, client cannot retry | Scheduled reconciler with compare-and-set claims; old idempotency keys purged | `PendingOrderReconcilerTest` |
+| 35 | `ServiceException(String)` dropped its message | `ServiceException.java:31` | Errors read "ServiceException: null" | Text kept as the exception message | Whole suite |
+| 36 | Reset link host taken from the request; two-day, reusable, date-only tokens | `UserFacadeImpl.java:822` | Reset tokens can be sent to an attacker's host | Allow-listed origins, one-hour single-use tokens | `UserFacadeResetOriginTest` |
+
+Admin defects, fixed in [shopizer-admin-hardened](https://github.com/pavansky/shopizer-admin-hardened): Braintree form values, retry of POST requests, 1-based pager on a 0-based API, password reset hard-coded to DEFAULT, malformed `env.js` and `/api/api/v1` default, and an unreproducible build with no lockfile.
+
 ## Found while verifying
 
 These came up when running the fixed build end to end, and are fixed in the same commits:
 
 - **Self-deadlock in the first version of persist-then-charge.** The payment record was written in the outer transaction and updated from an inner one, so the finalise step waited on its own lock. Fixed by keeping `processOrder` out of the long transaction.
+- **Lock outside a transaction.** The payment service is not covered by the XML transaction advisor, so the first refund lock ran with no transaction. Capture and refund are now explicitly transactional.
 - **Ambiguous routes.** `{id:\d+}` and `{friendlyUrl}` both matched numeric paths. The slug route now requires a non-digit.
 - **Health component hidden.** Hiding components made `/actuator/health/ping` return 404, and the storefront uses it at startup. Components stay visible and details stay hidden.
 
 ## How it was verified
 
-- `mvn verify`: 124 tests, 0 failures (21 skipped are upstream `@Ignore`).
+- `mvn verify`: 167 tests, 0 failures (21 skipped are upstream `@Ignore`).
 - [scripts/demo-checkout.sh](../scripts/demo-checkout.sh) against a fresh instance. Output: [demo-output.txt](demo-output.txt).
 - `mysql` profile on an empty MySQL 8 database: Flyway applies V1 to V3, Hibernate validates the mapping, and the application starts.
 

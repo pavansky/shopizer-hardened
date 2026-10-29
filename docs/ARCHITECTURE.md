@@ -92,13 +92,29 @@ sequenceDiagram
 - Stock is reserved with `UPDATE ... WHERE quantity >= :q`, so two checkouts cannot both take the last unit.
 - Status changes follow an explicit transition table (`OrderStatusTransitions`); illegal moves return 409.
 
+### Recovering stuck orders
+
+```mermaid
+flowchart LR
+  J[Reconciler every 5 min] --> Q[PAYMENT_PENDING older than 15 min, batches of 100]
+  Q --> P{Payment recorded?}
+  P -->|yes| F[CAS to ORDERED or PROCESSED]
+  P -->|no| X[CAS to PAYMENT_FAILED<br/>return stock<br/>release idempotency key]
+  F --> M[Counters at /actuator/prometheus]
+  X --> M
+```
+
+- Each order is claimed with a compare-and-set, so two instances never settle the same order.
+- Each order runs in its own transaction, so one bad order does not stop the batch.
+
 ## 3. Payment modules
 
 | Module | Before | After |
 |---|---|---|
 | Braintree | Sale without `submitForSettlement`: funds held, never settled | Sale settles; real gateway status recorded |
 | Stripe | Amount built by deleting "." from "1,234.56"; key in a global static | Minor units per currency from BigDecimal; key passed per request |
-| Capture / refund API | Returned 200 and did nothing | Returns 501 until implemented |
+| Capture / refund API | Returned 200 and did nothing | Store-scoped, amount-checked, row-locked operations recorded in the ledger |
+| Braintree refund | Refund on unsettled sales failed | Void when unsettled, refund when settled |
 
 ## 4. Runtime behaviour
 
