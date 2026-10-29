@@ -448,9 +448,30 @@ public class MultipleEntryPointsSecurityConfig {
 		@Autowired
 		private JWTAdminServicesImpl jwtUserDetailsService;
 
+		/**
+		 * Network ranges allowed to scrape /actuator/prometheus without a token, comma
+		 * separated. Default is loopback only, which fits a metrics sidecar in the same
+		 * task or pod. The demo compose file sets its private Docker network. Never set
+		 * a public range here, and never put the API behind a proxy that forwards from
+		 * the internet while a private range is allowed.
+		 */
+		@org.springframework.beans.factory.annotation.Value("${shopizer.metrics.scrape-cidrs:127.0.0.1/32}")
+		private String scrapeCidrs;
+
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
 			auth.userDetailsService(jwtUserDetailsService);
+		}
+
+		String prometheusAccess() {
+			StringBuilder expr = new StringBuilder("hasRole('AUTH')");
+			for (String cidr : scrapeCidrs.split(",")) {
+				String c = cidr.trim();
+				if (!c.isEmpty() && c.matches("[0-9a-fA-F.:/]+")) {
+					expr.append(" or hasIpAddress('").append(c).append("')");
+				}
+			}
+			return expr.toString();
 		}
 
 		@Override
@@ -475,6 +496,7 @@ public class MultipleEntryPointsSecurityConfig {
 
 					// actuator: health and info are public, the rest needs an admin token
 					.antMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+					.antMatchers(HttpMethod.GET, "/actuator/prometheus").access(prometheusAccess())
 					.antMatchers("/actuator/**").hasRole("AUTH")
 
 					// read-only catalog, content, search, store and reference data
