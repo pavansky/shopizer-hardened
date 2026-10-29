@@ -76,6 +76,17 @@ public class UserFacadeImpl implements UserFacade {
 
 	private static final String resetUserLink = "user/%s/reset/%s"; // front
 
+	/** Reset tokens are valid for one hour and can be used once. */
+	private static final long RESET_TOKEN_VALIDITY_MS = 60L * 60L * 1000L;
+
+	/**
+	 * Origins allowed to receive password reset links. The return URL comes from the
+	 * request, so without this check anyone could have reset tokens mailed as links to
+	 * a host they control. Same list as the CORS allow-list.
+	 */
+	@org.springframework.beans.factory.annotation.Value("${shopizer.cors.allowed-origins:http://localhost:3000,http://localhost:4200}")
+	private String allowedResetOrigins;
+
 	private static final String ACCOUNT_PASSWORD_RESET_TPL = "email_template_password_reset_request_user.ftl";
 
 	private static final String RESET_PASSWORD_LINK = "RESET_PASSWORD_LINK";
@@ -808,7 +819,7 @@ public class UserFacadeImpl implements UserFacade {
 			// generates unique token
 			String token = UUID.randomUUID().toString();
 
-			Date expiry = DateUtil.addDaysToCurrentDate(2);
+			Date expiry = new Date(System.currentTimeMillis() + RESET_TOKEN_VALIDITY_MS);
 
 			CredentialsReset credsRequest = new CredentialsReset();
 			credsRequest.setCredentialsRequest(token);
@@ -822,6 +833,9 @@ public class UserFacadeImpl implements UserFacade {
 			String baseUrl = userContextPath; 
 			if(!filePathUtils.isValidURL(baseUrl)) {
 				throw new ServiceRuntimeException("Request url [" + baseUrl + "] is invalid");
+			}
+			if(!isAllowedResetOrigin(baseUrl)) {
+				throw new ServiceRuntimeException("Return url [" + baseUrl + "] is not an allowed origin");
 			}
 
 			// need to add link to controller receiving user reset password
@@ -855,6 +869,8 @@ public class UserFacadeImpl implements UserFacade {
 
 		User user = verifyUserLink(token, store);// reverify
 		user.setAdminPassword(passwordEncoder.encode(password));
+		// single use: the token cannot be replayed after a successful reset
+		user.setCredentialsResetRequest(null);
 		
 		try {
 			userService.save(user);
@@ -864,6 +880,21 @@ public class UserFacadeImpl implements UserFacade {
 
 	}
 	
+	boolean isAllowedResetOrigin(String url) {
+		try {
+			java.net.URI uri = new java.net.URI(url);
+			String origin = uri.getScheme() + "://" + uri.getHost() + (uri.getPort() == -1 ? "" : ":" + uri.getPort());
+			for (String allowed : allowedResetOrigins.split(",")) {
+				if (origin.equalsIgnoreCase(allowed.trim())) {
+					return true;
+				}
+			}
+			return false;
+		} catch (java.net.URISyntaxException e) {
+			return false;
+		}
+	}
+
 	private User verifyUserLink(String token, String store) {
 
 		User user = null;
@@ -884,7 +915,8 @@ public class UserFacadeImpl implements UserFacade {
 			throw new GenericRuntimeException("No expiry date configured for token [" + token + "]");
 		}
 
-		if (!DateUtil.dateBeforeEqualsDate(new Date(), tokenExpiry)) {
+		// compare full timestamps; the old check compared dates only
+		if (new Date().after(tokenExpiry)) {
 			throw new GenericRuntimeException("Ttoken [" + token + "] has expired");
 		}
 
