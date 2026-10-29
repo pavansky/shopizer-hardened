@@ -41,6 +41,24 @@ public class BraintreePayment implements PaymentModule {
 			com.braintreegateway.Transaction.Status.SETTLED,
 			com.braintreegateway.Transaction.Status.SETTLEMENT_PENDING);
 
+	/** Not yet settled: can only be voided, for the full amount */
+	private static final EnumSet<com.braintreegateway.Transaction.Status> VOIDABLE_STATUSES = EnumSet.of(
+			com.braintreegateway.Transaction.Status.AUTHORIZED,
+			com.braintreegateway.Transaction.Status.SUBMITTED_FOR_SETTLEMENT);
+
+	/** Settled or settling: can be refunded, fully or partially */
+	private static final EnumSet<com.braintreegateway.Transaction.Status> REFUNDABLE_STATUSES = EnumSet.of(
+			com.braintreegateway.Transaction.Status.SETTLED,
+			com.braintreegateway.Transaction.Status.SETTLING);
+
+	private static IntegrationException refundException(String message) {
+		IntegrationException te = new IntegrationException(message);
+		te.setExceptionType(IntegrationException.TRANSACTION_EXCEPTION);
+		te.setMessageCode("message.payment.error");
+		te.setErrorCode(IntegrationException.TRANSACTION_EXCEPTION);
+		return te;
+	}
+
 	/**
 	 * Builds the Braintree gateway for the given configuration.
 	 * Protected so it can be overridden in tests.
@@ -417,9 +435,29 @@ public class BraintreePayment implements PaymentModule {
 	    }
 		
 	    BraintreeGateway gateway = gateway(configuration);
-	    
 
-        Result<com.braintreegateway.Transaction> result = gateway.transaction().refund(auth, amount);
+	    // Braintree only refunds settled (or settling) transactions; anything
+	    // not yet settled has to be voided instead, which releases the full amount.
+	    com.braintreegateway.Transaction original;
+	    try {
+	    	original = gateway.transaction().find(auth);
+	    } catch (com.braintreegateway.exceptions.NotFoundException nfe) {
+	    	throw refundException("Can't process Braintree refund, transaction " + auth + " not found");
+	    }
+	    com.braintreegateway.Transaction.Status status = original == null ? null : original.getStatus();
+
+        Result<com.braintreegateway.Transaction> result;
+        if (VOIDABLE_STATUSES.contains(status)) {
+        	if (partial) {
+        		throw refundException("Can't partially refund Braintree transaction " + auth + " in status " + status
+        				+ "; it is not settled yet and can only be voided for the full amount");
+        	}
+        	result = gateway.transaction().voidTransaction(auth);
+        } else if (REFUNDABLE_STATUSES.contains(status)) {
+        	result = gateway.transaction().refund(auth, amount);
+        } else {
+        	throw refundException("Can't refund Braintree transaction " + auth + " in status " + status);
+        }
 
         String trxId = null;
         
@@ -456,7 +494,7 @@ public class BraintreePayment implements PaymentModule {
         trx.setTransactionType(TransactionType.REFUND);
         trx.setPaymentType(PaymentType.CREDITCARD);
         trx.getTransactionDetails().put("TRANSACTIONID", trxId);
-        trx.getTransactionDetails().put("TRNAPPROVED", null);
+        trx.getTransactionDetails().put("TRNAPPROVED", VOIDABLE_STATUSES.contains(status) ? "VOIDED" : "REFUNDED");
         trx.getTransactionDetails().put("TRNORDERNUMBER", trxId);
         trx.getTransactionDetails().put("MESSAGETEXT", null);
         

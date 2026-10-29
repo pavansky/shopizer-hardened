@@ -385,25 +385,24 @@ public class Stripe3Payment implements PaymentModule {
 
 			RequestOptions requestOptions = requestOptions(apiKey);
 
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(trnID, requestOptions);
-
 			Map<String, Object> params = new HashMap<>();
-			params.put("payment_intent", paymentIntent.getId());
+			params.put("payment_intent", trnID);
 			params.put("amount", minorAmount);
-			Refund re = Refund.create(params, requestOptions);
+			Refund re = createRefund(params, requestOptions);
 
-			transaction = new Transaction();
-			transaction.setAmount(order.getTotal());
-			transaction.setOrder(order);
-			transaction.setTransactionDate(new Date());
-			transaction.setTransactionType(TransactionType.CAPTURE);
-			transaction.setPaymentType(PaymentType.CREDITCARD);
-			transaction.getTransactionDetails().put("TRANSACTIONID", transaction.getTransactionDetails().get("TRANSACTIONID"));
-			transaction.getTransactionDetails().put("TRNAPPROVED", re.getReason());
-			transaction.getTransactionDetails().put("TRNORDERNUMBER", re.getId());
-			transaction.getTransactionDetails().put("MESSAGETEXT", null);
+			Transaction refund = new Transaction();
+			refund.setAmount(amount);
+			refund.setOrder(order);
+			refund.setTransactionDate(new Date());
+			refund.setTransactionType(TransactionType.REFUND);
+			refund.setPaymentType(PaymentType.CREDITCARD);
+			refund.getTransactionDetails().put("TRANSACTIONID", re.getId());
+			refund.getTransactionDetails().put("TRNAPPROVED", re.getStatus());
+			refund.getTransactionDetails().put("TRNORDERNUMBER", re.getId());
+			refund.getTransactionDetails().put("REFUNDEDTRANSACTION", trnID);
+			refund.getTransactionDetails().put("MESSAGETEXT", null);
 
-			return transaction;
+			return refund;
 
 			
 		} catch(Exception e) {
@@ -611,6 +610,13 @@ public class Stripe3Payment implements PaymentModule {
 
 
 
+
+	/**
+	 * Creates the refund on Stripe. Protected so tests can stub the network call.
+	 */
+	protected Refund createRefund(Map<String, Object> params, RequestOptions requestOptions) throws StripeException {
+		return Refund.create(params, requestOptions);
+	}
 
 	/**
 	 * Per-call options carrying this store's secret key. The module is a singleton shared by

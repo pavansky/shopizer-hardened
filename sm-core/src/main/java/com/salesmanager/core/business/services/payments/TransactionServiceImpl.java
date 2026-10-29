@@ -12,13 +12,14 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
 import javax.inject.Inject;
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
-import java.util.HashMap;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
-import java.util.TreeMap;
-import java.util.stream.Collectors;
+import java.util.Set;
 
 
 
@@ -51,152 +52,132 @@ public class TransactionServiceImpl  extends SalesManagerEntityServiceImpl<Long,
 	@Override
 	public List<Transaction> listTransactions(Order order) throws ServiceException {
 		
-		List<Transaction> transactions = transactionRepository.findByOrder(order.getId());
-		ObjectMapper mapper = new ObjectMapper();
+		List<Transaction> transactions = chronological(order);
 		for(Transaction transaction : transactions) {
-				if(!StringUtils.isBlank(transaction.getDetails())) {
-					try {
-						@SuppressWarnings("unchecked")
-						Map<String,String> objects = mapper.readValue(transaction.getDetails(), Map.class);
-						transaction.setTransactionDetails(objects);
-					} catch (Exception e) {
-						throw new ServiceException(e);
-					}
-				}
+			parseDetails(transaction);
 		}
-		
 		return transactions;
 	}
 	
 	/**
-	 * Authorize
-	 * AuthorizeAndCapture
-	 * Capture
-	 * Refund
-	 * 
-	 * Check transactions
-	 * next transaction flow is
-	 * Build map of transactions map
-	 * filter get last from date
-	 * get last transaction type
-	 * verify which step transaction it if
-	 * check if target transaction is in transaction map we are in trouble...
-	 * 
+	 * Orders transactions chronologically: by audit date created, then by
+	 * transaction date when the audit date is missing, then by id. Transaction
+	 * type plays no role in ordering.
 	 */
-	public Transaction lastTransaction(Order order, MerchantStore store) throws ServiceException {
-		
-		List<Transaction> transactions = transactionRepository.findByOrder(order.getId());
-		//ObjectMapper mapper = new ObjectMapper();
-		
-		//TODO order by date
-	    TreeMap<String, Transaction> map = transactions.stream()
-	    	      .collect(
+	static final Comparator<Transaction> CHRONOLOGICAL = Comparator
+			.comparing(TransactionServiceImpl::createdDate, Comparator.nullsFirst(Comparator.naturalOrder()))
+			.thenComparing(Transaction::getId, Comparator.nullsLast(Comparator.naturalOrder()));
 
-	    	    		  Collectors.toMap(
-	    	    				  Transaction::getTransactionTypeName, transaction -> transaction,(o1, o2) -> o1, TreeMap::new)
-	    	    		  
-	    	    		  
-	    	    		  );
-	    
-		  
-	    
-		//get last transaction
-	    Entry<String,Transaction> last = map.lastEntry();
-	    
-	    String currentStep = last.getKey();
-	    
-	    System.out.println("Current step " + currentStep);
-	    
-	    //find next step
-	    
-	    return last.getValue();
-	    
-
-
+	private static Date createdDate(Transaction transaction) {
+		if (transaction.getAuditSection() != null && transaction.getAuditSection().getDateCreated() != null) {
+			return transaction.getAuditSection().getDateCreated();
+		}
+		return transaction.getTransactionDate();
 	}
 
-	@Override
-	public Transaction getCapturableTransaction(Order order)
-			throws ServiceException {
+	/** Transactions of an order, oldest first. */
+	private List<Transaction> chronological(Order order) {
 		List<Transaction> transactions = transactionRepository.findByOrder(order.getId());
-		ObjectMapper mapper = new ObjectMapper();
-		Transaction capturable = null;
-		for(Transaction transaction : transactions) {
-			if(transaction.getTransactionType().name().equals(TransactionType.AUTHORIZE.name())) {
-				if(!StringUtils.isBlank(transaction.getDetails())) {
-					try {
-						@SuppressWarnings("unchecked")
-						Map<String,String> objects = mapper.readValue(transaction.getDetails(), Map.class);
-						transaction.setTransactionDetails(objects);
-						capturable = transaction;
-					} catch (Exception e) {
-						throw new ServiceException(e);
-					}
-				}
-			}
-			if(transaction.getTransactionType().name().equals(TransactionType.CAPTURE.name())) {
-				break;
-			}
-			if(transaction.getTransactionType().name().equals(TransactionType.REFUND.name())) {
-				break;
-			}
+		if (transactions == null) {
+			return new ArrayList<Transaction>();
 		}
-		
-		return capturable;
+		List<Transaction> sorted = new ArrayList<Transaction>(transactions);
+		sorted.sort(CHRONOLOGICAL);
+		return sorted;
 	}
-	
-	@Override
-	public Transaction getRefundableTransaction(Order order)
-		throws ServiceException {
-		List<Transaction> transactions = transactionRepository.findByOrder(order.getId());
-		Map<String,Transaction> finalTransactions = new HashMap<String,Transaction>();
-		Transaction finalTransaction = null;
-		for(Transaction transaction : transactions) {
-			if(transaction.getTransactionType().name().equals(TransactionType.AUTHORIZECAPTURE.name())) {
-				finalTransactions.put(TransactionType.AUTHORIZECAPTURE.name(),transaction);
-				continue;
-			}
-			if(transaction.getTransactionType().name().equals(TransactionType.CAPTURE.name())) {
-				finalTransactions.put(TransactionType.CAPTURE.name(),transaction);
-				continue;
-			}
-			if(transaction.getTransactionType().name().equals(TransactionType.REFUND.name())) {
-				//check transaction id
-				Transaction previousRefund = finalTransactions.get(TransactionType.REFUND.name());
-				if(previousRefund!=null) {
-					Date previousDate = previousRefund.getTransactionDate();
-					Date currentDate = transaction.getTransactionDate();
-					if(previousDate.before(currentDate)) {
-						finalTransactions.put(TransactionType.REFUND.name(),transaction);
-						continue;
-					}
-				} else {
-					finalTransactions.put(TransactionType.REFUND.name(),transaction);
-					continue;
-				}
-			}
-		}
-		
-		if(finalTransactions.containsKey(TransactionType.AUTHORIZECAPTURE.name())) {
-			finalTransaction = finalTransactions.get(TransactionType.AUTHORIZECAPTURE.name());
-		}
-		
-		if(finalTransactions.containsKey(TransactionType.CAPTURE.name())) {
-			finalTransaction = finalTransactions.get(TransactionType.CAPTURE.name());
-		}
 
-		if(finalTransaction!=null && !StringUtils.isBlank(finalTransaction.getDetails())) {
+	private void parseDetails(Transaction transaction) throws ServiceException {
+		if (!StringUtils.isBlank(transaction.getDetails())) {
 			try {
-				ObjectMapper mapper = new ObjectMapper();
 				@SuppressWarnings("unchecked")
-				Map<String,String> objects = mapper.readValue(finalTransaction.getDetails(), Map.class);
-				finalTransaction.setTransactionDetails(objects);
+				Map<String, String> objects = new ObjectMapper().readValue(transaction.getDetails(), Map.class);
+				transaction.setTransactionDetails(objects);
 			} catch (Exception e) {
 				throw new ServiceException(e);
 			}
 		}
-		
-		return finalTransaction;
+	}
+
+	/**
+	 * Most recent transaction of the order (by creation date, then id), or null
+	 * when the order has no transaction.
+	 */
+	@Override
+	public Transaction lastTransaction(Order order, MerchantStore store) throws ServiceException {
+		List<Transaction> transactions = chronological(order);
+		if (transactions.isEmpty()) {
+			return null;
+		}
+		return transactions.get(transactions.size() - 1);
+	}
+
+	/**
+	 * The latest AUTHORIZE transaction, provided no CAPTURE, AUTHORIZECAPTURE or
+	 * REFUND was recorded after it. Returns null when nothing is capturable.
+	 */
+	@Override
+	public Transaction getCapturableTransaction(Order order)
+			throws ServiceException {
+		Transaction capturable = null;
+		for (Transaction transaction : chronological(order)) {
+			TransactionType type = transaction.getTransactionType();
+			if (type == TransactionType.AUTHORIZE) {
+				capturable = transaction;
+			} else if (type == TransactionType.CAPTURE || type == TransactionType.AUTHORIZECAPTURE
+					|| type == TransactionType.REFUND) {
+				capturable = null;
+			}
+		}
+		if (capturable != null) {
+			parseDetails(capturable);
+		}
+		return capturable;
+	}
+
+	/**
+	 * The latest CAPTURE or AUTHORIZECAPTURE transaction, i.e. the gateway
+	 * transaction a refund applies to. Returns null when nothing was captured.
+	 */
+	@Override
+	public Transaction getRefundableTransaction(Order order)
+		throws ServiceException {
+		Transaction refundable = null;
+		for (Transaction transaction : chronological(order)) {
+			TransactionType type = transaction.getTransactionType();
+			if (type == TransactionType.CAPTURE || type == TransactionType.AUTHORIZECAPTURE) {
+				refundable = transaction;
+			}
+		}
+		if (refundable != null) {
+			parseDetails(refundable);
+		}
+		return refundable;
+	}
+
+	@Override
+	public BigDecimal getCapturedAmount(Order order) throws ServiceException {
+		return sum(order, EnumSet.of(TransactionType.CAPTURE, TransactionType.AUTHORIZECAPTURE));
+	}
+
+	@Override
+	public BigDecimal getRefundedAmount(Order order) throws ServiceException {
+		return sum(order, EnumSet.of(TransactionType.REFUND));
+	}
+
+	@Override
+	public BigDecimal getRefundableAmount(Order order) throws ServiceException {
+		BigDecimal remaining = getCapturedAmount(order).subtract(getRefundedAmount(order));
+		return remaining.signum() < 0 ? BigDecimal.ZERO : remaining;
+	}
+
+	private BigDecimal sum(Order order, Set<TransactionType> types) {
+		BigDecimal total = BigDecimal.ZERO;
+		for (Transaction transaction : chronological(order)) {
+			if (types.contains(transaction.getTransactionType()) && transaction.getAmount() != null) {
+				total = total.add(transaction.getAmount());
+			}
+		}
+		return total;
 	}
 
 	@Override

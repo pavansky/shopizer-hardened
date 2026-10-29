@@ -1,5 +1,6 @@
 package com.salesmanager.shop.store.controller.order.facade;
 
+import java.math.BigDecimal;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -169,6 +170,22 @@ public interface OrderFacade {
 	 * @throws Exception
 	 */
 	ReadableTransaction captureOrder(MerchantStore store, Order order, Customer customer, Language language) throws Exception;
+
+	/**
+	 * Captures the pending authorization of an order of the given store.
+	 * @throws com.salesmanager.shop.store.api.exception.ResourceNotFoundException order not in store
+	 * @throws com.salesmanager.shop.store.api.exception.ConflictException nothing capturable
+	 */
+	ReadableTransaction captureOrder(MerchantStore store, Long orderId, Language language);
+
+	/**
+	 * Refunds an order of the given store. A null amount refunds everything
+	 * still refundable (captured minus already refunded).
+	 * @throws com.salesmanager.shop.store.api.exception.ResourceNotFoundException order not in store
+	 * @throws com.salesmanager.shop.store.api.exception.ConflictException nothing refundable
+	 * @throws com.salesmanager.shop.store.api.exception.RestApiException invalid amount (400)
+	 */
+	ReadableTransaction refundOrder(MerchantStore store, Long orderId, BigDecimal amount, Language language);
 
 	/**
 	 * Returns next TransactionType expected if any.

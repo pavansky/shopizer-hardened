@@ -36,12 +36,14 @@ import org.springframework.validation.ObjectError;
 import com.salesmanager.core.business.constants.Constants;
 import com.salesmanager.core.business.exception.ConversionException;
 import com.salesmanager.core.business.exception.ServiceException;
+import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.business.services.catalog.pricing.PricingService;
 import com.salesmanager.core.business.services.catalog.product.ProductService;
 import com.salesmanager.core.business.services.catalog.product.attribute.ProductAttributeService;
 import com.salesmanager.core.business.services.catalog.product.file.DigitalProductService;
 import com.salesmanager.core.business.services.order.OrderChargedNotRecordedException;
 import com.salesmanager.core.business.services.order.OrderService;
+import com.salesmanager.core.business.services.order.IllegalOrderStatusTransitionException;
 import com.salesmanager.core.business.services.order.OrderStatusTransitions;
 import com.salesmanager.core.business.services.order.idempotency.IdempotencyConflictException;
 import com.salesmanager.core.business.services.order.idempotency.OrderIdempotencyService;
@@ -105,7 +107,10 @@ import com.salesmanager.shop.populator.order.ReadableOrderProductPopulator;
 import com.salesmanager.shop.populator.order.ShoppingCartItemPopulator;
 import com.salesmanager.shop.populator.order.transaction.PersistablePaymentPopulator;
 import com.salesmanager.shop.populator.order.transaction.ReadableTransactionPopulator;
+import com.salesmanager.shop.store.api.exception.ConflictException;
+import com.salesmanager.shop.store.api.exception.GenericRuntimeException;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
+import com.salesmanager.shop.store.api.exception.RestApiException;
 import com.salesmanager.shop.store.api.exception.ServiceRuntimeException;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.controller.shoppingCart.facade.ShoppingCartFacade;
@@ -164,6 +169,9 @@ public class OrderFacadeImpl implements OrderFacade {
 
 	@Autowired
 	private TransactionService transactionService;
+
+	@Inject
+	private CustomerService customerService;
 
 	@Inject
 	private EmailTemplatesUtils emailTemplatesUtils;
@@ -1520,6 +1528,82 @@ public class OrderFacadeImpl implements OrderFacade {
 	}
 
 	@Override
+	public ReadableTransaction captureOrder(MerchantStore store, Long orderId, Language language) {
+		Validate.notNull(store, "MerchantStore must not be null");
+		Order order = storeOrder(orderId, store);
+		try {
+			if (transactionService.getCapturableTransaction(order) == null) {
+				throw new ConflictException("Order id [" + orderId + "] has no capturable transaction");
+			}
+			Customer customer = order.getCustomerId() == null ? null : customerService.getById(order.getCustomerId());
+			if (customer == null) {
+				throw new ResourceNotFoundException("Order id [" + orderId + "] has an invalid customer [" + order.getCustomerId() + "]");
+			}
+			return toReadable(paymentService.processCapturePayment(order, customer, store), store, language);
+		} catch (ServiceException e) {
+			throw paymentFailure("capture", orderId, e);
+		} catch (IllegalOrderStatusTransitionException e) {
+			throw new ConflictException(e.getMessage());
+		}
+	}
+
+	@Override
+	public ReadableTransaction refundOrder(MerchantStore store, Long orderId, BigDecimal amount, Language language) {
+		Validate.notNull(store, "MerchantStore must not be null");
+		Order order = storeOrder(orderId, store);
+		try {
+			if (transactionService.getRefundableTransaction(order) == null) {
+				throw new ConflictException("Order id [" + orderId + "] has no captured payment to refund");
+			}
+			BigDecimal remaining = transactionService.getRefundableAmount(order);
+			if (remaining.signum() <= 0) {
+				throw new ConflictException("Order id [" + orderId + "] is already fully refunded");
+			}
+			BigDecimal refundAmount = amount == null ? remaining : amount;
+			if (refundAmount.signum() <= 0 || refundAmount.compareTo(remaining) > 0) {
+				throw new RestApiException("400",
+						"Refund amount must be greater than 0 and at most " + remaining + ", was " + refundAmount);
+			}
+			return toReadable(paymentService.processRefund(order, null, store, refundAmount), store, language);
+		} catch (ServiceException e) {
+			throw paymentFailure("refund", orderId, e);
+		} catch (IllegalOrderStatusTransitionException e) {
+			throw new ConflictException(e.getMessage());
+		}
+	}
+
+	private Order storeOrder(Long orderId, MerchantStore store) {
+		Order order = orderId == null ? null : orderService.getOrder(orderId, store);
+		if (order == null) {
+			throw new ResourceNotFoundException("Order id [" + orderId + "] not found for store [" + store.getCode() + "]");
+		}
+		return order;
+	}
+
+	private ReadableTransaction toReadable(Transaction transactionModel, MerchantStore store, Language language)
+			throws ServiceException {
+		ReadableTransaction transaction = new ReadableTransaction();
+		ReadableTransactionPopulator trxPopulator = new ReadableTransactionPopulator();
+		trxPopulator.setOrderService(orderService);
+		trxPopulator.setPricingService(pricingService);
+		try {
+			trxPopulator.populate(transactionModel, transaction, store, language);
+		} catch (ConversionException e) {
+			throw new ServiceException(e);
+		}
+		return transaction;
+	}
+
+	/** Validation failures from the payment service are client errors; anything else (gateway) is a server error. */
+	private RuntimeException paymentFailure(String operation, Long orderId, ServiceException e) {
+		if (e.getExceptionType() == ServiceException.EXCEPTION_VALIDATION) {
+			return new RestApiException("400", e.getMessage());
+		}
+		LOGGER.error("Payment " + operation + " failed for order [" + orderId + "]", e);
+		return new GenericRuntimeException("500", "Payment " + operation + " failed for order [" + orderId + "]: " + e.getMessage(), e);
+	}
+
+	@Override
 	public List<ReadableOrderStatusHistory> getReadableOrderHistory(Long orderId, MerchantStore store,
 			Language language) {
 
@@ -1655,7 +1739,9 @@ public class OrderFacadeImpl implements OrderFacade {
 
 			Transaction last = transactionService.lastTransaction(modelOrder, store);
 
-			if(last.getTransactionType().name().equals(TransactionType.AUTHORIZE.name())) {
+			if(last == null) {
+				return TransactionType.OK;
+			} else if(last.getTransactionType().name().equals(TransactionType.AUTHORIZE.name())) {
 				return TransactionType.CAPTURE;
 			} else if(last.getTransactionType().name().equals(TransactionType.AUTHORIZECAPTURE.name())) {
 				return TransactionType.REFUND;

@@ -6,7 +6,6 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -22,6 +21,7 @@ import org.springframework.stereotype.Service;
 import com.salesmanager.core.business.constants.Constants;
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.order.OrderService;
+import com.salesmanager.core.business.services.order.OrderStatusTransitions;
 import com.salesmanager.core.business.services.reference.loader.ConfigurationModulesLoader;
 import com.salesmanager.core.business.services.system.MerchantConfigurationService;
 import com.salesmanager.core.business.services.system.ModuleConfigurationService;
@@ -29,8 +29,6 @@ import com.salesmanager.core.business.utils.CoreConfiguration;
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.Order;
-import com.salesmanager.core.model.order.OrderTotal;
-import com.salesmanager.core.model.order.OrderTotalType;
 import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.order.orderstatus.OrderStatusHistory;
 import com.salesmanager.core.model.payments.CreditCardPayment;
@@ -51,6 +49,21 @@ import com.salesmanager.core.modules.utils.Encryption;
 
 @Service("paymentService")
 public class PaymentServiceImpl implements PaymentService {
+
+	@javax.persistence.PersistenceContext
+	private javax.persistence.EntityManager em;
+
+	/**
+	 * Serialises capture and refund per order. Taken as the first statement of the
+	 * transaction, so a concurrent request waits here and then reads the ledger as
+	 * committed by the first one; two refunds can no longer both pass the
+	 * remaining-amount check.
+	 */
+	void lockOrder(Order order) {
+		if (em != null && order.getId() != null) {
+			em.find(Order.class, order.getId(), javax.persistence.LockModeType.PESSIMISTIC_WRITE);
+		}
+	}
 	
 	
 	private static final Logger LOGGER = LoggerFactory.getLogger(PaymentServiceImpl.class);
@@ -328,26 +341,14 @@ public class PaymentServiceImpl implements PaymentService {
 			throw new ServiceException("Payment module " + payment.getModuleName() + " is not active");
 		}
 		
-		String sTransactionType = configuration.getIntegrationKeys().get("transaction");
-		if(sTransactionType==null) {
-			sTransactionType = TransactionType.AUTHORIZECAPTURE.name();
-		}
-		
-		try {
-			TransactionType.valueOf(sTransactionType);
-		} catch(IllegalArgumentException ie) {
-			LOGGER.warn("Transaction type " + sTransactionType + " does noe exist, using default AUTHORIZECAPTURE");
-			sTransactionType = "AUTHORIZECAPTURE";
-		}
+		TransactionType configuredType = resolveTransactionType(configuration.getIntegrationKeys().get("transaction"));
+		String sTransactionType = configuredType.name();
 
-		
-
-		if(sTransactionType.equals(TransactionType.AUTHORIZE.name())) {
+		if(configuredType == TransactionType.AUTHORIZE) {
 			payment.setTransactionType(TransactionType.AUTHORIZE);
 		} else {
 			payment.setTransactionType(TransactionType.AUTHORIZECAPTURE);
-		} 
-		
+		}
 
 		PaymentModule module = this.paymentModules.get(payment.getModuleName());
 		
@@ -401,172 +402,162 @@ public class PaymentServiceImpl implements PaymentService {
 		return paymentModules.get(paymentModuleCode);
 	}
 	
+	/**
+	 * Maps the "transaction" key of a payment module configuration to a
+	 * TransactionType. The legacy admin form posts "SALE", which means
+	 * authorize and capture. Missing values default to AUTHORIZECAPTURE;
+	 * unknown values also default to AUTHORIZECAPTURE and are logged.
+	 */
+	static TransactionType resolveTransactionType(String configured) {
+		if (StringUtils.isBlank(configured)) {
+			return TransactionType.AUTHORIZECAPTURE;
+		}
+		String value = configured.trim().toUpperCase();
+		if ("SALE".equals(value)) {
+			return TransactionType.AUTHORIZECAPTURE;
+		}
+		if (TransactionType.AUTHORIZE.name().equals(value) || TransactionType.AUTHORIZECAPTURE.name().equals(value)) {
+			return TransactionType.valueOf(value);
+		}
+		LOGGER.warn("Unknown payment transaction type [{}] in module configuration, using AUTHORIZECAPTURE", configured);
+		return TransactionType.AUTHORIZECAPTURE;
+	}
+
 	@Override
+	// One transaction: the order row lock, the gateway call and the ledger entry commit together.
+	@org.springframework.transaction.annotation.Transactional(rollbackFor = Exception.class)
 	public Transaction processCapturePayment(Order order, Customer customer,
 			MerchantStore store)
 			throws ServiceException {
 
-
 		Validate.notNull(customer);
 		Validate.notNull(store);
 		Validate.notNull(order);
+		lockOrder(order);
 
-		
-
-		//must have a shipping module configured
-		Map<String, IntegrationConfiguration> modules = this.getPaymentModulesConfigured(store);
-		if(modules==null){
-			throw new ServiceException("No payment module configured");
-		}
-		
-		IntegrationConfiguration configuration = modules.get(order.getPaymentModuleCode());
-		
-		if(configuration==null) {
-			throw new ServiceException("Payment module " + order.getPaymentModuleCode() + " is not configured");
-		}
-		
-		if(!configuration.isActive()) {
-			throw new ServiceException("Payment module " + order.getPaymentModuleCode() + " is not active");
-		}
-		
-		
-		PaymentModule module = this.paymentModules.get(order.getPaymentModuleCode());
-		
-		if(module==null) {
-			throw new ServiceException("Payment module " + order.getPaymentModuleCode() + " does not exist");
-		}
-		
-
+		IntegrationConfiguration configuration = activeConfiguration(store, order.getPaymentModuleCode());
+		PaymentModule module = paymentModule(order.getPaymentModuleCode());
 		IntegrationModule integrationModule = getPaymentMethodByCode(store,order.getPaymentModuleCode());
-		
-		//TransactionType transactionType = payment.getTransactionType();
 
-			//get the previous transaction
 		Transaction trx = transactionService.getCapturableTransaction(order);
 		if(trx==null) {
-			throw new ServiceException("No capturable transaction for order id " + order.getId());
+			throw new ServiceException(ServiceException.EXCEPTION_VALIDATION,
+					"No capturable transaction for order id " + order.getId(), "message.payment.error");
 		}
 		Transaction transaction = module.capture(store, customer, order, trx, configuration, integrationModule);
+		if(transaction == null) {
+			throw new ServiceException("Payment module " + order.getPaymentModuleCode() + " returned no capture transaction");
+		}
 		transaction.setOrder(order);
-		
-		
-
 		transactionService.create(transaction);
-		
-		
-		OrderStatusHistory orderHistory = new OrderStatusHistory();
-		orderHistory.setOrder(order);
-		orderHistory.setStatus(OrderStatus.PROCESSED);
-		orderHistory.setDateAdded(new Date());
-		
-		orderService.addOrderStatusHistory(order, orderHistory);
-		
-		order.setStatus(OrderStatus.PROCESSED);
-		orderService.saveOrUpdate(order);
+
+		changeStatus(order, OrderStatus.PROCESSED, "Payment captured, amount " + transaction.getAmount());
 
 		return transaction;
-
-		
-
 	}
 
+	/**
+	 * Refunds the given amount against the latest captured transaction.
+	 * The amount must be positive and not exceed captured minus already
+	 * refunded. A refund that brings the remaining amount to zero moves the
+	 * order to REFUNDED; a partial refund only adds a history comment. The
+	 * order total is left untouched; refunds are tracked as REFUND
+	 * transactions in the ledger.
+	 */
 	@Override
+	// One transaction: the order row lock, the gateway call and the ledger entry commit together.
+	@org.springframework.transaction.annotation.Transactional(rollbackFor = Exception.class)
 	public Transaction processRefund(Order order, Customer customer,
 			MerchantStore store, BigDecimal amount)
 			throws ServiceException {
-		
-		
-		Validate.notNull(customer);
+
 		Validate.notNull(store);
 		Validate.notNull(amount);
 		Validate.notNull(order);
-		Validate.notNull(order.getOrderTotal());
-		
-		
-		BigDecimal orderTotal = order.getTotal();
-		
-		if(amount.doubleValue()>orderTotal.doubleValue()) {
-			throw new ServiceException("Invalid amount, the refunded amount is greater than the total allowed");
+		lockOrder(order);
+
+		Transaction refundable = transactionService.getRefundableTransaction(order);
+		if(refundable==null) {
+			throw new ServiceException(ServiceException.EXCEPTION_VALIDATION,
+					"No refundable transaction for order id " + order.getId(), "message.payment.error");
 		}
 
-		
-		String module = order.getPaymentModuleCode();
+		BigDecimal remaining = transactionService.getRefundableAmount(order);
+		if(amount.signum() <= 0 || amount.compareTo(remaining) > 0) {
+			throw new ServiceException(ServiceException.EXCEPTION_VALIDATION,
+					"Invalid refund amount " + amount + ", refundable amount is " + remaining, "message.payment.error");
+		}
+
+		String moduleCode = order.getPaymentModuleCode();
+		IntegrationConfiguration configuration = activeConfiguration(store, moduleCode);
+		PaymentModule paymentModule = paymentModule(moduleCode);
+		IntegrationModule integrationModule = getPaymentMethodByCode(store,moduleCode);
+
+		boolean partial = amount.compareTo(remaining) < 0;
+
+		Transaction transaction = paymentModule.refund(partial, store, refundable, order, amount, configuration, integrationModule);
+		if(transaction == null) {
+			throw new ServiceException("Payment module " + moduleCode + " returned no refund transaction");
+		}
+		// the ledger entry always reflects what was refunded, whatever the module returned
+		transaction.setTransactionType(TransactionType.REFUND);
+		transaction.setAmount(amount);
+		transaction.setOrder(order);
+		transactionService.create(transaction);
+
+		if(partial) {
+			BigDecimal left = remaining.subtract(amount);
+			addHistory(order, order.getStatus(), "Partial refund of " + amount + ", remaining refundable " + left);
+			orderService.saveOrUpdate(order);
+		} else {
+			changeStatus(order, OrderStatus.REFUNDED, "Refund of " + amount);
+		}
+
+		return transaction;
+	}
+
+	private IntegrationConfiguration activeConfiguration(MerchantStore store, String moduleCode) throws ServiceException {
 		Map<String, IntegrationConfiguration> modules = this.getPaymentModulesConfigured(store);
 		if(modules==null){
 			throw new ServiceException("No payment module configured");
 		}
-		
-		IntegrationConfiguration configuration = modules.get(module);
-		
+		IntegrationConfiguration configuration = modules.get(moduleCode);
 		if(configuration==null) {
-			throw new ServiceException("Payment module " + module + " is not configured");
+			throw new ServiceException("Payment module " + moduleCode + " is not configured");
 		}
-		
-		PaymentModule paymentModule = this.paymentModules.get(module);
-		
-		if(paymentModule==null) {
-			throw new ServiceException("Payment module " + paymentModule + " does not exist");
+		if(!configuration.isActive()) {
+			throw new ServiceException("Payment module " + moduleCode + " is not active");
 		}
-		
-		boolean partial = false;
-		if(amount.doubleValue()!=order.getTotal().doubleValue()) {
-			partial = true;
-		}
-		
-		IntegrationModule integrationModule = getPaymentMethodByCode(store,module);
-		
-		//get the associated transaction
-		Transaction refundable = transactionService.getRefundableTransaction(order);
-		
-		if(refundable==null) {
-			throw new ServiceException("No refundable transaction for this order");
-		}
-		
-		Transaction transaction = paymentModule.refund(partial, store, refundable, order, amount, configuration, integrationModule);
-		transaction.setOrder(order);
-		transactionService.create(transaction);
-		
-        OrderTotal refund = new OrderTotal();
-        refund.setModule(Constants.OT_REFUND_MODULE_CODE);
-        refund.setText(Constants.OT_REFUND_MODULE_CODE);
-        refund.setTitle(Constants.OT_REFUND_MODULE_CODE);
-        refund.setOrderTotalCode(Constants.OT_REFUND_MODULE_CODE);
-        refund.setOrderTotalType(OrderTotalType.REFUND);
-        refund.setValue(amount);
-        refund.setSortOrder(100);
-        refund.setOrder(order);
-        
-        order.getOrderTotal().add(refund);
-        
-		//update order total
-		orderTotal = orderTotal.subtract(amount);
-        
-        //update ordertotal refund
-        Set<OrderTotal> totals = order.getOrderTotal();
-        for(OrderTotal total : totals) {
-        	if(total.getModule().equals(Constants.OT_TOTAL_MODULE_CODE)) {
-        		total.setValue(orderTotal);
-        	}
-        }
+		return configuration;
+	}
 
-		
+	private PaymentModule paymentModule(String moduleCode) throws ServiceException {
+		PaymentModule module = this.paymentModules.get(moduleCode);
+		if(module==null) {
+			throw new ServiceException("Payment module " + moduleCode + " does not exist");
+		}
+		return module;
+	}
 
-		order.setTotal(orderTotal);
-		order.setStatus(OrderStatus.REFUNDED);
-		
-		
-		
+	/** Applies a status change through the transition table and records it in the order history. */
+	private void changeStatus(Order order, OrderStatus target, String comment) throws ServiceException {
+		if(order.getStatus() != target) {
+			OrderStatusTransitions.check(order.getStatus(), target);
+			order.setStatus(target);
+		}
+		addHistory(order, target, comment);
+		orderService.saveOrUpdate(order);
+	}
+
+	private void addHistory(Order order, OrderStatus status, String comment) {
 		OrderStatusHistory orderHistory = new OrderStatusHistory();
 		orderHistory.setOrder(order);
-		orderHistory.setStatus(OrderStatus.REFUNDED);
+		orderHistory.setStatus(status);
+		orderHistory.setComments(comment);
 		orderHistory.setDateAdded(new Date());
-        order.getOrderHistory().add(orderHistory);
-        
-        orderService.saveOrUpdate(order);
-
-		return transaction;
+		order.getOrderHistory().add(orderHistory);
 	}
-	
+
 	@Override
 	public void validateCreditCard(String number, CreditCardType creditCard, String month, String date)
 	throws ServiceException {

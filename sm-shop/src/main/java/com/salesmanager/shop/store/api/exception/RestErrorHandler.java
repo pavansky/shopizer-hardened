@@ -96,6 +96,17 @@ public class RestErrorHandler {
     }
 
     @RequestMapping(produces = "application/json")
+    @ExceptionHandler(ConflictException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public @ResponseBody ErrorEntity handleConflictException(ConflictException exception) {
+        log.warn(exception.getErrorMessage());
+
+        ErrorEntity errorEntity = createErrorEntity(exception.getErrorCode(), exception.getErrorMessage(),
+                exception.getLocalizedMessage());
+        return errorEntity;
+    }
+
+    @RequestMapping(produces = "application/json")
     @ExceptionHandler(NotImplementedException.class)
     @ResponseStatus(HttpStatus.NOT_IMPLEMENTED)
     public @ResponseBody ErrorEntity handleNotImplementedException(NotImplementedException exception) {

@@ -1,5 +1,6 @@
 package com.salesmanager.shop.store.api.v1.order;
 
+import java.math.BigDecimal;
 import java.security.Principal;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -45,7 +46,6 @@ import com.salesmanager.shop.model.order.transaction.ReadableTransaction;
 import com.salesmanager.shop.model.order.v0.ReadableOrderList;
 import com.salesmanager.shop.populator.order.transaction.PersistablePaymentPopulator;
 import com.salesmanager.shop.populator.order.transaction.ReadableTransactionPopulator;
-import com.salesmanager.shop.store.api.exception.NotImplementedException;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.controller.order.facade.OrderFacade;
 import com.salesmanager.shop.utils.AuthorizationUtils;
@@ -281,14 +281,15 @@ public class OrderPaymentApi {
 		}
 	}
 
+	private void authorizeOrderAdmin(MerchantStore merchantStore) {
+		String user = authorizationUtils.authenticatedUser();
+		authorizationUtils.authorizeUser(user, Stream.of(Constants.GROUP_SUPERADMIN, Constants.GROUP_ADMIN,
+				Constants.GROUP_ADMIN_ORDER).collect(Collectors.toList()), merchantStore);
+	}
+
 	/**
-	 * Capture payment transaction for a given order id
-	 *
-	 * @param id
-	 * @param request
-	 * @param response
-	 * @return
-	 * @throws Exception
+	 * Captures the pending AUTHORIZE transaction of an order.
+	 * 404 when the order does not belong to the store, 409 when nothing is capturable.
 	 */
 	@RequestMapping(value = { "/private/orders/{id}/capture" }, method = RequestMethod.POST)
 	@ResponseStatus(HttpStatus.OK)
@@ -297,49 +298,41 @@ public class OrderPaymentApi {
 			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
 	public ReadableTransaction capturePayment(@PathVariable Long id, @ApiIgnore MerchantStore merchantStore,
 			@ApiIgnore Language language) {
-		/*
-		 * try {
-		 * 
-		 * // need order Order order = orderService.getById(id);
-		 * 
-		 * if (order == null) { response.sendError(404, "Order id " + id +
-		 * " does not exist"); return null; }
-		 * 
-		 * // need customer Customer customer =
-		 * customerService.getById(order.getCustomerId());
-		 * 
-		 * if (customer == null) { response.sendError(404, "Order id " + id +
-		 * " contains an invalid customer " + order.getCustomerId()); return
-		 * null; }
-		 * 
-		 * ReadableTransaction transaction =
-		 * orderFacade.captureOrder(merchantStore, order, customer, language);
-		 * 
-		 * return transaction;
-		 * 
-		 * } catch (Exception e) { LOGGER.error("Error while capturing payment",
-		 * e); try { response.sendError(503, "Error while capturing payment " +
-		 * e.getMessage()); } catch (Exception ignore) { } return null; }
-		 */
-
-		throw new NotImplementedException("Payment capture is not implemented");
+		authorizeOrderAdmin(merchantStore);
+		return orderFacade.captureOrder(merchantStore, id, language);
 	}
 
 	/**
-	 * Refund payment
-	 * 
-	 * @param id
-	 * @param merchantStore
-	 * @param language
-	 * @return
+	 * Refunds an order. The optional body {"amount": decimal} defaults to the
+	 * full remaining refundable amount (captured minus already refunded).
+	 * 400 for an invalid amount, 404 when the order does not belong to the
+	 * store, 409 when nothing is refundable.
 	 */
 	@RequestMapping(value = { "/private/orders/{id}/refund" }, method = RequestMethod.POST)
 	@ResponseStatus(HttpStatus.OK)
 	@ResponseBody
 	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "String", defaultValue = "DEFAULT"),
 			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
-	public ReadableTransaction refundPayment(@PathVariable Long id, @ApiIgnore MerchantStore merchantStore,
+	public ReadableTransaction refundPayment(@PathVariable Long id,
+			@RequestBody(required = false) RefundRequest refund,
+			@ApiIgnore MerchantStore merchantStore,
 			@ApiIgnore Language language) {
-		throw new NotImplementedException("Payment refund is not implemented");
+		authorizeOrderAdmin(merchantStore);
+		BigDecimal amount = refund == null ? null : refund.getAmount();
+		return orderFacade.refundOrder(merchantStore, id, amount, language);
+	}
+
+	/** Optional refund request body. */
+	public static class RefundRequest {
+
+		private BigDecimal amount;
+
+		public BigDecimal getAmount() {
+			return amount;
+		}
+
+		public void setAmount(BigDecimal amount) {
+			this.amount = amount;
+		}
 	}
 }

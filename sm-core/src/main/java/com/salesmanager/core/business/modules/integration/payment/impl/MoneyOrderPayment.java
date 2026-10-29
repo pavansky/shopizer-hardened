@@ -98,7 +98,17 @@ public class MoneyOrderPayment implements PaymentModule {
 			Order order, BigDecimal amount, 
 			IntegrationConfiguration configuration, IntegrationModule module)
 			throws IntegrationException {
-		throw new IntegrationException("Transaction not supported");
+		// Money orders are settled outside the system, so a refund is a ledger entry
+		// recording money the merchant returned by hand. Amount limits are checked by
+		// PaymentServiceImpl before this is called.
+		Transaction refund = new Transaction();
+		refund.setAmount(amount);
+		refund.setTransactionDate(new Date());
+		refund.setTransactionType(TransactionType.REFUND);
+		refund.setPaymentType(PaymentType.MONEYORDER);
+		refund.setOrder(order);
+		refund.getTransactionDetails().put("TRNAPPROVED", "MANUAL_REFUND");
+		return refund;
 	}
 
 	@Override
