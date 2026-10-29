@@ -1,0 +1,54 @@
+name: sandbox
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: sandbox
+  cancel-in-progress: false
+jobs:
+  sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+      BRAINTREE_SANDBOX_MERCHANT_ID: ${{ secrets.BRAINTREE_SANDBOX_MERCHANT_ID }}
+      BRAINTREE_SANDBOX_PUBLIC_KEY: ${{ secrets.BRAINTREE_SANDBOX_PUBLIC_KEY }}
+      BRAINTREE_SANDBOX_PRIVATE_KEY: ${{ secrets.BRAINTREE_SANDBOX_PRIVATE_KEY }}
+    steps:
+      - name: Check which sandboxes are configured
+        id: keys
+        run: |
+          stripe=false; braintree=false
+          if [ -n "$STRIPE_TEST_SECRET_KEY" ]; then stripe=true; fi
+          if [ -n "$BRAINTREE_SANDBOX_MERCHANT_ID" ] && [ -n "$BRAINTREE_SANDBOX_PUBLIC_KEY" ] && [ -n "$BRAINTREE_SANDBOX_PRIVATE_KEY" ]; then braintree=true; fi
+          echo "stripe=$stripe" >> "$GITHUB_OUTPUT"
+          echo "braintree=$braintree" >> "$GITHUB_OUTPUT"
+          if [ "$stripe" = false ] && [ "$braintree" = false ]; then
+            echo "::notice::No sandbox secrets configured; skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.keys.outputs.run == 'true'
+      - uses: actions/setup-java@v4
+        if: steps.keys.outputs.run == 'true'
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+      - name: Sandbox integration tests
+        if: steps.keys.outputs.run == 'true'
+        run: mvn -B -ntp -Psandbox verify | tee sandbox.log; exit "${PIPESTATUS[0]}"
+      - name: Proof summary
+        if: always() && steps.keys.outputs.run == 'true'
+        run: |
+          {
+            echo "### Sandbox proof (stripe=${{ steps.keys.outputs.stripe }}, braintree=${{ steps.keys.outputs.braintree }})"
+            echo '```'
+            grep '\[sandbox-proof\]' sandbox.log || echo "no proof lines"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -242,4 +242,37 @@
 	</dependencies>
 	
 
+	<profiles>
+		<!--
+			Real-network proof against the Stripe test mode and the Braintree sandbox.
+			mvn -Psandbox verify runs only the *SandboxIT classes; each class is also
+			disabled unless its gateway's environment variables are set.
+		-->
+		<profile>
+			<id>sandbox</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-failsafe-plugin</artifactId>
+						<configuration>
+							<includes>
+								<include>**/sandbox/*SandboxIT.java</include>
+							</includes>
+							<trimStackTrace>false</trimStackTrace>
+						</configuration>
+						<executions>
+							<execution>
+								<goals>
+									<goal>integration-test</goal>
+									<goal>verify</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+
 </project>

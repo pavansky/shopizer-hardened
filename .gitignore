@@ -30,3 +30,7 @@ sm-shop/.project
 .DS_Store
 
 .mvnw/*.jar
+
+# local demo secrets
+deploy/.env
+sandbox.log
