@@ -37,6 +37,9 @@
 		<!--java version -->
 		<java.version>11</java.version>
 
+		<!-- stripe-java 34 needs gson 2.10 (ReflectionAccessFilter); Spring Boot 2.5 manages 2.8 -->
+		<gson.version>2.10.1</gson.version>
+
 		<maven.compiler.source>${java.version}</maven.compiler.source>
 		<maven.compiler.target>${java.version}</maven.compiler.target>
 
@@ -311,14 +314,14 @@
 			<dependency>
 				<groupId>com.stripe</groupId>
 				<artifactId>stripe-java</artifactId>
-				<version>19.5.0</version>
+				<version>34.0.0</version>
 			</dependency>
 
 			<!-- Braintree -->
 			<dependency>
 				<groupId>com.braintreepayments.gateway</groupId>
 				<artifactId>braintree-java</artifactId>
-				<version>2.73.0</version>
+				<version>3.55.1</version>
 			</dependency>
 
 			<!-- https://mvnrepository.com/artifact/com.maxmind.geoip2/geoip2 -->

@@ -157,4 +157,12 @@ class Stripe3StatusLookupTest {
 		assertEquals("ref-1", Stripe3Payment.requestOptions("sk", "ref-1").getIdempotencyKey());
 		assertNull(Stripe3Payment.requestOptions("sk").getIdempotencyKey());
 	}
+
+	@Test
+	void statementSuffixIsShortAndClean() {
+		assertEquals("Sandbox pr", Stripe3Payment.statementSuffix("Sandbox proof store"));
+		assertEquals("Bobs", Stripe3Payment.statementSuffix("<Bob's*>"));
+		assertNull(Stripe3Payment.statementSuffix("  "));
+		assertNull(Stripe3Payment.statementSuffix(null));
+	}
 }

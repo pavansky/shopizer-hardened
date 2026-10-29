@@ -26,6 +26,7 @@ import com.salesmanager.core.model.system.IntegrationModule;
 import com.salesmanager.core.modules.integration.IntegrationException;
 import com.salesmanager.core.modules.integration.PaymentOutcomeUnknownException;
 import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
+import com.salesmanager.core.modules.integration.payment.model.PaymentCompensation;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
 import com.salesmanager.core.modules.integration.payment.model.PaymentStatusLookup;
 import com.stripe.exception.ApiConnectionException;
@@ -37,8 +38,9 @@ import com.stripe.exception.StripeException;
 import com.stripe.model.Charge;
 import com.stripe.model.Refund;
 import com.stripe.net.RequestOptions;
+import com.stripe.param.ChargeSearchParams;
 
-public class StripePayment implements PaymentModule, PaymentStatusLookup {
+public class StripePayment implements PaymentModule, PaymentStatusLookup, PaymentCompensation {
 	
 	
 	private final static String AUTHORIZATION = "Authorization";
@@ -607,15 +609,133 @@ public class StripePayment implements PaymentModule, PaymentStatusLookup {
 		return StringUtils.trimToNull(payment.getPaymentMetaData().get(PaymentAttempt.META_ATTEMPT_REF));
 	}
 
+	/** Searches charges. Protected so tests can stub the network call. */
+	protected List<Charge> searchCharges(ChargeSearchParams params, RequestOptions requestOptions)
+			throws StripeException {
+		return Charge.search(params, requestOptions).getData();
+	}
+
+	/** Stripe search query matching the attempt reference stored in charge metadata. */
+	static String attemptQuery(String attemptRef) {
+		String escaped = attemptRef.replace("\\", "\\\\").replace("'", "\\'");
+		return "metadata['attempt_ref']:'" + escaped + "'";
+	}
+
 	/**
-	 * The legacy Charge API offers no lookup by attempt reference, so the answer
-	 * is always PENDING: the reconciler leaves the order alone and moves it to
-	 * PAYMENT_REVIEW once it is old enough, for a person to check in Stripe.
+	 * Maps one charge to the gateway answer: succeeded and captured took the money,
+	 * succeeded and not captured holds it, pending is not final, failed took nothing.
+	 * A fully refunded charge no longer holds money and counts as FAILED, so the
+	 * reconciler never compensates it twice.
+	 */
+	static GatewayPaymentStatus toStatus(Charge charge, String currency) {
+		String status = charge.getStatus();
+		String id = charge.getId();
+		if (Boolean.TRUE.equals(charge.getRefunded())) {
+			return GatewayPaymentStatus.failed(id, "refunded");
+		}
+		if ("succeeded".equals(status)) {
+			boolean captured = Boolean.TRUE.equals(charge.getCaptured());
+			Long minor = captured && charge.getAmountCaptured() != null ? charge.getAmountCaptured() : charge.getAmount();
+			BigDecimal amount = amount(minor, charge, currency);
+			return captured ? GatewayPaymentStatus.succeeded(id, amount, status)
+					: GatewayPaymentStatus.authorized(id, amount, status);
+		}
+		if ("failed".equals(status)) {
+			return GatewayPaymentStatus.failed(id, status);
+		}
+		return GatewayPaymentStatus.pending(id, status);
+	}
+
+	private static BigDecimal amount(Long minor, Charge charge, String currency) {
+		String code = StringUtils.isNotBlank(charge.getCurrency()) ? charge.getCurrency() : currency;
+		if (minor == null || StringUtils.isBlank(code)) {
+			return null;
+		}
+		return StripeAmounts.fromMinorUnits(minor, code.toUpperCase(java.util.Locale.ROOT));
+	}
+
+	private static int rank(GatewayPaymentStatus s) {
+		switch (s.getOutcome()) {
+		case SUCCEEDED:
+			return 3;
+		case PENDING:
+			return 2;
+		case FAILED:
+			return 1;
+		default:
+			return 0;
+		}
+	}
+
+	/**
+	 * Finds the charge through the search API on metadata attempt_ref. Stripe's
+	 * search index can lag new charges by up to about a minute, so an empty result
+	 * right after a charge is not proof of absence; the reconciler only acts on
+	 * NOT_FOUND once the attempt is older than notFoundSafeMinutes, which is far
+	 * longer than that lag.
 	 */
 	@Override
 	public GatewayPaymentStatus lookup(MerchantStore store, IntegrationConfiguration configuration,
-			PaymentAttempt attempt) {
-		return GatewayPaymentStatus.pending(null, "legacy Stripe charges cannot be looked up");
+			PaymentAttempt attempt) throws IntegrationException {
+		if (StringUtils.isBlank(attempt.getAttemptRef())) {
+			return GatewayPaymentStatus.pending(null, "no attempt reference to search on");
+		}
+		String apiKey = configuration.getIntegrationKeys().get("secretKey");
+		ChargeSearchParams params = ChargeSearchParams.builder()
+				.setQuery(attemptQuery(attempt.getAttemptRef()))
+				.setLimit(10L)
+				.build();
+		try {
+			GatewayPaymentStatus best = null;
+			for (Charge charge : searchCharges(params, requestOptions(apiKey))) {
+				GatewayPaymentStatus s = toStatus(charge, attempt.getCurrency());
+				// one success wins; a pending charge beats a failed retry
+				if (best == null || rank(s) > rank(best)) {
+					best = s;
+				}
+			}
+			return best == null ? GatewayPaymentStatus.notFound() : best;
+		} catch (StripeException e) {
+			throw new IntegrationException("Stripe charge search for " + attempt.getAttemptRef() + " failed", e);
+		}
+	}
+
+	/**
+	 * Refunds the late charge in full. Refunding an uncaptured charge releases the
+	 * hold, so one call covers both cases. The idempotency key makes a repeated
+	 * compensation a no-op on Stripe's side.
+	 */
+	@Override
+	public Transaction compensate(MerchantStore store, IntegrationConfiguration configuration, PaymentAttempt attempt,
+			GatewayPaymentStatus status) throws IntegrationException {
+		String chargeId = StringUtils.isNotBlank(status.getGatewayTransactionId()) ? status.getGatewayTransactionId()
+				: attempt.getGatewayRef();
+		if (StringUtils.isBlank(chargeId)) {
+			throw new IntegrationException("Can't compensate Stripe attempt " + attempt.getAttemptRef()
+					+ ", no charge id");
+		}
+		String apiKey = configuration.getIntegrationKeys().get("secretKey");
+		Map<String, Object> params = new HashMap<>();
+		params.put("charge", chargeId);
+		Map<String, String> metadata = new HashMap<>();
+		metadata.put("attempt_ref", attempt.getAttemptRef());
+		params.put("metadata", metadata);
+		try {
+			Refund re = createRefund(params, requestOptions(apiKey, "comp-" + attempt.getAttemptRef()));
+			Transaction refund = new Transaction();
+			refund.setAmount(status.getAmount() != null ? status.getAmount() : attempt.getAmount());
+			refund.setTransactionDate(new Date());
+			refund.setTransactionType(TransactionType.REFUND);
+			refund.setPaymentType(PaymentType.CREDITCARD);
+			refund.getTransactionDetails().put("TRANSACTIONID", re.getId());
+			refund.getTransactionDetails().put("TRNAPPROVED", re.getStatus());
+			refund.getTransactionDetails().put("TRNORDERNUMBER", re.getId());
+			refund.getTransactionDetails().put("REFUNDEDTRANSACTION", chargeId);
+			refund.getTransactionDetails().put("MESSAGETEXT", null);
+			return refund;
+		} catch (StripeException e) {
+			throw new IntegrationException("Stripe compensation of " + chargeId + " failed", e);
+		}
 	}
 
 }

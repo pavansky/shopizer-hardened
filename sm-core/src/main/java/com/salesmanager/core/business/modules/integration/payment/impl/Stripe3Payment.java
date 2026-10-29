@@ -244,11 +244,7 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			PaymentIntentCaptureParams params =
 					PaymentIntentCaptureParams.builder()
 							.setAmountToCapture(minorAmount)
-							.setStatementDescriptor(
-									store.getStorename().length() > 22 ?
-											store.getStorename().substring(0, 22) :
-											store.getStorename()
-							)
+							.setStatementDescriptorSuffix(statementSuffix(store.getStorename()))
 					.build();
 
 			paymentIntent = paymentIntent.capture(params, requestOptions);
@@ -330,11 +326,7 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			PaymentIntentCaptureParams params =
 					PaymentIntentCaptureParams.builder()
 							.setAmountToCapture(minorAmount)
-							.setStatementDescriptor(
-									store.getStorename().length() > 22 ?
-											store.getStorename().substring(0, 22) :
-											store.getStorename()
-							)
+							.setStatementDescriptorSuffix(statementSuffix(store.getStorename()))
 					.build();
 
 			paymentIntent = paymentIntent.capture(params, captureOptions);
@@ -655,6 +647,20 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			return null;
 		}
 		return StringUtils.trimToNull(payment.getPaymentMetaData().get(PaymentAttempt.META_ATTEMPT_REF));
+	}
+
+	/**
+	 * Card payments reject a full statement_descriptor on current Stripe API
+	 * versions; only a suffix appended to the account's prefix is allowed. Stripe
+	 * caps the combined text at 22 characters, so the suffix stays short and
+	 * drops characters Stripe refuses.
+	 */
+	static String statementSuffix(String storeName) {
+		String cleaned = StringUtils.defaultString(storeName).replaceAll("[<>\\\\'\"*]", "").trim();
+		if (cleaned.isEmpty()) {
+			return null;
+		}
+		return cleaned.length() > 10 ? cleaned.substring(0, 10).trim() : cleaned;
 	}
 
 	/** Retrieves a PaymentIntent. Protected so tests can stub the network call. */
