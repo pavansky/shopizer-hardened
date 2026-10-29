@@ -42,6 +42,12 @@ public class EmailTemplatesUtils {
 	private EmailService emailService;
 
 	@Inject
+	private com.salesmanager.core.business.services.order.OrderService orderService;
+
+	@Inject
+	private com.salesmanager.core.business.services.customer.CustomerService customerService;
+
+	@Inject
 	private LabelUtils messages;
 	
 	@Inject
@@ -85,8 +91,28 @@ public class EmailTemplatesUtils {
 	 * @param merchantStore
 	 * @param contextPath
 	 */
+	/**
+	 * Runs on the async pool, so it must not touch entities that belong to the request
+	 * thread's persistence context. Lazy loading them here used the request's session
+	 * and JDBC connection from a second thread, which under concurrent checkouts broke
+	 * the request's commit ("ResultSet is from UPDATE", ConcurrentModificationException)
+	 * after the order was already placed. The order and customer are reloaded by id in
+	 * this thread's own read-only transaction instead.
+	 */
 	@Async
+	@org.springframework.transaction.annotation.Transactional(readOnly = true)
 	public void sendOrderEmail(String toEmail, Customer customer, Order order, Locale customerLocale, Language language, MerchantStore merchantStore, String contextPath) {
+		order = orderService.getOrder(order.getId(), merchantStore);
+		if (order == null) {
+			LOGGER.warn("Order confirmation email skipped: order not found");
+			return;
+		}
+		if (customer != null && customer.getId() != null) {
+			Customer reloaded = customerService.getById(customer.getId());
+			if (reloaded != null) {
+				customer = reloaded;
+			}
+		}
 			   /** issue with putting that elsewhere **/ 
 		       LOGGER.info( "Sending welcome email to customer" );
 		       try {
@@ -356,10 +382,22 @@ public class EmailTemplatesUtils {
 	 * @param merchantStore
 	 * @param customerLocale
 	 */
+	/** Same rule as sendOrderEmail: reload entities in this thread's own transaction. */
 	@Async
+	@org.springframework.transaction.annotation.Transactional(readOnly = true)
 	public void sendUpdateOrderStatusEmail(
 			Customer customer, Order order, OrderStatusHistory lastHistory, MerchantStore merchantStore,
 			Locale customerLocale, String contextPath) {
+		Order reloadedOrder = orderService.getOrder(order.getId(), merchantStore);
+		if (reloadedOrder != null) {
+			order = reloadedOrder;
+		}
+		if (customer != null && customer.getId() != null) {
+			Customer reloaded = customerService.getById(customer.getId());
+			if (reloaded != null) {
+				customer = reloaded;
+			}
+		}
 		   /** issue with putting that elsewhere **/ 
 	       LOGGER.info( "Sending order status email to customer" );
 	       try {

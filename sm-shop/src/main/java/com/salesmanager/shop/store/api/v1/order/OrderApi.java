@@ -394,6 +394,7 @@ public class OrderApi {
 		} catch (PaymentConfirmationPendingException e) {
 			throw new PaymentBeingConfirmed(e.getOrderId());
 		} catch (Exception e) {
+			rethrowIfOutOfStock(e);
 			LOGGER.error("Error while processing checkout", e);
 			try {
 				response.sendError(503, "Error while processing checkout " + e.getMessage());
@@ -472,6 +473,7 @@ public class OrderApi {
 		} catch (PaymentConfirmationPendingException e) {
 			throw new PaymentBeingConfirmed(e.getOrderId());
 		} catch (Exception e) {
+			rethrowIfOutOfStock(e);
 			if(e instanceof CredentialsException) {
 				throw new GenericRuntimeException("412","Credentials creation Failed [" + e.getMessage() + "]");
 			}
@@ -589,5 +591,23 @@ public class OrderApi {
 		entity.setErrorCode(code);
 		entity.setMessage(message);
 		return entity;
+	}
+
+	/**
+	 * Running out of stock is a business conflict, not a server error. The exception can
+	 * arrive wrapped by the facade, so the cause chain is searched; the client gets 409
+	 * with the reason instead of a 500 or 503.
+	 */
+	private static void rethrowIfOutOfStock(Throwable e) {
+		for (Throwable t = e; t != null; t = t.getCause()) {
+			if (t instanceof com.salesmanager.core.business.exception.ServiceException
+					&& ((com.salesmanager.core.business.exception.ServiceException) t).getExceptionType()
+							== com.salesmanager.core.business.exception.ServiceException.EXCEPTION_INVENTORY_MISMATCH) {
+				throw new com.salesmanager.shop.store.api.exception.ConflictException(t.getMessage());
+			}
+			if (t.getCause() == t) {
+				break;
+			}
+		}
 	}
 }
