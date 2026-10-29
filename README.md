@@ -16,7 +16,7 @@ The architecture is kept on purpose. This is the same modular monolith, with cor
 | Stock | Oversell check commented out | Conditional decrement before charging |
 | Order status | Any change allowed | Explicit transition table, 409 on illegal moves |
 | Capture and refund | Returned 200 and did nothing | Real operations: store-scoped, amount-checked, row-locked, recorded as REFUND |
-| Stuck orders | Left in limbo | Scheduled reconciler finalises or fails them and returns stock |
+| Stuck orders | Left in limbo, or failed while the customer was charged | Write-ahead payment attempts, gateway lookups, signed Stripe webhooks, review queue, automatic refund of late charges |
 | Store isolation | SKU queries drop the store filter | Every SKU query scoped to the caller's store |
 | Tokens | One secret `aSecret`, 7 days, admin and customer interchangeable | `JWT_SECRET` 64+ bytes, 1 hour, typed tokens |
 | Default access | Unlisted paths unauthenticated. All actuator endpoints public | Deny by default. Only health and info public |
@@ -29,7 +29,7 @@ Every row links to a defect with file and line in [docs/FIXES.md](docs/FIXES.md)
 ## Read in this order
 
 1. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): before and after diagrams for security, checkout, payments and runtime.
-2. [docs/FIXES.md](docs/FIXES.md): the 36 defects, where they were, the effect, the fix and the test.
+2. [docs/FIXES.md](docs/FIXES.md): the 40 defects, where they were, the effect, the fix and the test.
 3. [docs/adr](docs/adr): one page per design decision, including what was kept and why.
 4. The commit history: one commit per fix, on top of the tag `baseline-3.2.7`.
 
@@ -59,6 +59,8 @@ For MySQL, run with the `mysql` profile. Flyway creates or upgrades the schema a
 | `JWT_SECRET` | HS512 signing key, 64+ bytes | Development value, logs a warning |
 | `JWT_EXPIRATION_SECONDS` | Access token lifetime | 3600 |
 | `CORS_ALLOWED_ORIGINS` | Storefront and admin origins | `http://localhost:3000,http://localhost:4200` |
+
+For Stripe webhooks, point an endpoint at `/api/v1/webhooks/stripe/<storeCode>` for the `payment_intent.*` events, and save its signing secret in the store's Stripe settings as the webhook secret.
 
 ## Check the fixes yourself
 
@@ -92,9 +94,14 @@ That returned 204 on 3.2.7 and now returns 401.
 
 The Angular admin fixes live in [pavansky/shopizer-admin-hardened](https://github.com/pavansky/shopizer-admin-hardened): valid Braintree transaction types, safe retries, the 0-based orders pager, store-aware password reset, a working runtime config and a reproducible build.
 
-## Design limits, on purpose
+## How a lost payment record is handled
 
-- **Payment record lost in a crash.** If the process dies after the gateway charges but before the payment record commits, the reconciler cannot see the payment and marks the order failed. Closing that needs a gateway lookup per module. The reconciler logs every decision and counts it at `/actuator/prometheus`, so these cases show up.
+This used to be a known limit. It is now closed.
+
+- **Payment outcomes come from the gateway.** Every gateway call is written ahead as a payment attempt whose reference goes to the gateway. A timeout keeps the order pending (the API answers 202) instead of failing it. A signed Stripe webhook settles the order within seconds, and the reconciler asks Braintree or Stripe what happened: a confirmed charge is recorded and the order finalised, a late charge on a failed order is voided or refunded, and an order the gateway cannot answer for moves to `PAYMENT_REVIEW` after a day. The legacy Stripe Charge module has no lookup, so its unclear cases always go to review. See [ADR 0011](docs/adr/0011-gateway-is-the-source-of-truth.md).
+
+## Deferred on purpose
+
 - **Spring Boot 3.** The upgrade is deliberately deferred. See [ADR 0008](docs/adr/0008-defer-the-spring-boot-upgrade.md).
 
 ## License and credit

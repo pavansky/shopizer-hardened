@@ -92,20 +92,67 @@ sequenceDiagram
 - Stock is reserved with `UPDATE ... WHERE quantity >= :q`, so two checkouts cannot both take the last unit.
 - Status changes follow an explicit transition table (`OrderStatusTransitions`); illegal moves return 409.
 
-### Recovering stuck orders
+### Payment attempts: the gateway decides
+
+A payment attempt is committed before every gateway call. Its reference goes to the gateway, so a charge the shop never recorded can still be found. See [ADR 0011](adr/0011-gateway-is-the-source-of-truth.md).
 
 ```mermaid
-flowchart LR
+sequenceDiagram
+  participant Svc as OrderServiceImpl
+  participant Steps as OrderCheckoutSteps
+  participant PSP as Payment gateway
+  participant DB
+  Svc->>Steps: createPendingOrder
+  Steps->>DB: order PAYMENT_PENDING, stock reserved
+  Svc->>Steps: beginPaymentAttempt (own transaction)
+  Steps->>DB: attempt INITIATED, attempt_ref, Stripe intent id
+  Svc->>PSP: charge (Braintree orderId / Stripe idempotency key = attempt_ref)
+  alt approved
+    Svc->>Steps: markPaymentSucceeded
+    Steps->>DB: order ORDERED, Transaction, attempt SUCCEEDED (one transaction)
+  else declined
+    Svc->>Steps: markPaymentFailed
+    Steps->>DB: order PAYMENT_FAILED, stock returned, attempt FAILED
+  else timeout / IO / unexpected error
+    Svc->>Steps: markPaymentOutcomeUnknown
+    Steps->>DB: attempt UNKNOWN, order stays PAYMENT_PENDING, stock held
+    Svc-->>Svc: 202 "payment_pending" with the order id
+  end
+```
+
+### Recovering stuck orders and late charges
+
+```mermaid
+flowchart TB
   J[Reconciler every 5 min] --> Q[PAYMENT_PENDING older than 15 min, batches of 100]
-  Q --> P{Payment recorded?}
+  Q --> P{Transaction stored or<br/>attempt SUCCEEDED?}
   P -->|yes| F[CAS to ORDERED or PROCESSED]
-  P -->|no| X[CAS to PAYMENT_FAILED<br/>return stock<br/>release idempotency key]
-  F --> M[Counters at /actuator/prometheus]
-  X --> M
+  P -->|no| A{Latest attempt}
+  A -->|none or FAILED| X[CAS to PAYMENT_FAILED<br/>return stock<br/>release idempotency key]
+  A -->|INITIATED or UNKNOWN| L[Ask the gateway]
+  L -->|SUCCEEDED| C[Record the missing Transaction<br/>CAS to ORDERED or PROCESSED<br/>'reconciled: payment confirmed by gateway']
+  L -->|FAILED| X
+  L -->|NOT_FOUND, older than 30 min| X
+  L -->|NOT_FOUND young, PENDING,<br/>or lookup error| W[Leave it]
+  W -->|older than 24 h| R[CAS to PAYMENT_REVIEW<br/>ERROR log, stock held]
+  J --> O[Open attempts on PAYMENT_FAILED<br/>or CANCELED orders]
+  O --> G[Ask the gateway]
+  G -->|SUCCEEDED| V[Void or refund, key comp-attempt_ref<br/>REFUND Transaction<br/>'compensated: late charge returned']
+  G -->|cannot compensate| N[Change nothing<br/>ERROR log, compensation_needed]
+  G -->|FAILED or NOT_FOUND| Z[Close attempt FAILED]
 ```
 
 - Each order is claimed with a compare-and-set, so two instances never settle the same order.
 - Each order runs in its own transaction, so one bad order does not stop the batch.
+- An order is never failed while its payment outcome is unknown and the gateway has not answered.
+- Counters at `/actuator/prometheus`: `shopizer_reconciliation_orders_total{outcome=...}` with finalised, failed, skipped, error, confirmed_by_gateway, review, lookup_error, compensated, compensation_needed.
+
+| Module | Status lookup | Compensation |
+|---|---|---|
+| Braintree | Search by order id = attempt_ref | Void if unsettled, refund if settled |
+| Stripe (PaymentIntents) | Retrieve the intent stored before the call | Cancel if only authorised, refund if captured |
+| Stripe (legacy Charges) | None: always PENDING, goes to review | None: compensation_needed |
+| Money order | No gateway | None |
 
 ## 3. Payment modules
 
