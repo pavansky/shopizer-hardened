@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.salesmanager.core.model.order.idempotency.OrderIdempotencyKey;
+import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 
 /**
  * Not a TransactionalAspectAwareService on purpose: boundaries are declared
@@ -62,5 +63,23 @@ public class OrderIdempotencyServiceImpl implements OrderIdempotencyService {
 		if (row != null) {
 			em.remove(row);
 		}
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public int releaseKeysForOrder(Long orderId) {
+		return em.createQuery("delete from OrderIdempotencyKey k where k.orderId = :o")
+				.setParameter("o", orderId).executeUpdate();
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public int deleteExpiredKeys(Date createdBefore) {
+		return em.createQuery("delete from OrderIdempotencyKey k where k.dateCreated < :c"
+				+ " and (k.orderId is null or not exists (select o.id from Order o"
+				+ " where o.id = k.orderId and o.status = :pending))")
+				.setParameter("c", createdBefore)
+				.setParameter("pending", OrderStatus.PAYMENT_PENDING)
+				.executeUpdate();
 	}
 }

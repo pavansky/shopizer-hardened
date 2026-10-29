@@ -30,4 +30,24 @@ public interface OrderCheckoutSteps {
 
 	/** Moves the order to PAYMENT_FAILED and returns the reserved inventory. */
 	void markPaymentFailed(Long orderId, List<ShoppingCartItem> items, String reason);
+
+	/**
+	 * Reconciliation of an order left in PAYMENT_PENDING for which a successful
+	 * payment transaction is already stored. Claims the order with a
+	 * compare-and-set PAYMENT_PENDING -> ORDERED (money order) or PROCESSED
+	 * (other payment types) and records the reconciliation in the history.
+	 *
+	 * @return false when the order is no longer PAYMENT_PENDING (another
+	 *         instance or the original request got there first)
+	 */
+	boolean reconcilePaidOrder(Long orderId, String comment) throws ServiceException;
+
+	/**
+	 * Reconciliation of an order left in PAYMENT_PENDING without any recorded
+	 * payment. Claims the order with a compare-and-set PAYMENT_PENDING ->
+	 * PAYMENT_FAILED and returns the inventory reserved for its lines.
+	 *
+	 * @return false when the order is no longer PAYMENT_PENDING
+	 */
+	boolean reconcileUnpaidOrder(Long orderId, String reason);
 }

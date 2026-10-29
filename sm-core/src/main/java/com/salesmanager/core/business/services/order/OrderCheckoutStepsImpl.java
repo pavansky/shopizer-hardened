@@ -1,5 +1,6 @@
 package com.salesmanager.core.business.services.order;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -21,8 +22,10 @@ import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.business.services.payments.TransactionService;
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.order.Order;
+import com.salesmanager.core.model.order.orderproduct.OrderProduct;
 import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.order.orderstatus.OrderStatusHistory;
+import com.salesmanager.core.model.payments.PaymentType;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
 
@@ -126,10 +129,93 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 			return;
 		}
 		order.setStatus(OrderStatus.PAYMENT_FAILED);
+		recordFailureAndRelease(order, items, reason);
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+	public boolean reconcilePaidOrder(Long orderId, String comment) throws ServiceException {
+		Order order = em.find(Order.class, orderId);
+		if (order == null) {
+			throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Order " + orderId + " not found");
+		}
+		OrderStatus target = order.getPaymentType() == PaymentType.MONEYORDER ? OrderStatus.ORDERED
+				: OrderStatus.PROCESSED;
+		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, target)) {
+			return false;
+		}
+		em.refresh(order);
+		order.getOrderHistory().add(history(order, target, StringUtils.abbreviate(comment, 250)));
+		return true;
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public boolean reconcileUnpaidOrder(Long orderId, String reason) {
+		// The conditional update is the claim: only the instance whose update
+		// matched the PAYMENT_PENDING row goes on to return the stock.
+		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, OrderStatus.PAYMENT_FAILED)) {
+			return false;
+		}
+		Order order = em.find(Order.class, orderId);
+		em.refresh(order);
+		recordFailureAndRelease(order, itemsOf(order), reason);
+		return true;
+	}
+
+	private boolean compareAndSet(Long orderId, OrderStatus from, OrderStatus to) {
+		OrderStatusTransitions.check(from, to);
+		return em.createQuery("update Order o set o.status = :to where o.id = :id and o.status = :from")
+				.setParameter("to", to)
+				.setParameter("id", orderId)
+				.setParameter("from", from)
+				.executeUpdate() == 1;
+	}
+
+	private void recordFailureAndRelease(Order order, List<ShoppingCartItem> items, String reason) {
 		order.getOrderHistory().add(history(order, OrderStatus.PAYMENT_FAILED, StringUtils.abbreviate(reason, 250)));
 		for (ShoppingCartItem item : items) {
 			release(item);
 		}
+	}
+
+	/**
+	 * Rebuilds the reserved lines from the stored order products. Order lines
+	 * keep only the SKU, so it is resolved to a variant first and then to a
+	 * product of the order's store; lines that no longer resolve are skipped.
+	 */
+	private List<ShoppingCartItem> itemsOf(Order order) {
+		List<ShoppingCartItem> items = new ArrayList<>();
+		if (order.getOrderProducts() == null) {
+			return items;
+		}
+		Integer storeId = order.getMerchant() == null ? null : order.getMerchant().getId();
+		for (OrderProduct line : order.getOrderProducts()) {
+			if (StringUtils.isBlank(line.getSku())) {
+				continue;
+			}
+			ShoppingCartItem item = new ShoppingCartItem();
+			item.setQuantity(line.getProductQuantity());
+			List<Object[]> variants = em.createQuery("select v.product.id, v.id from ProductVariant v"
+					+ " where v.sku = :s and v.product.merchantStore.id = :m", Object[].class)
+					.setParameter("s", line.getSku()).setParameter("m", storeId).setMaxResults(1).getResultList();
+			if (!variants.isEmpty()) {
+				item.setProductId((Long) variants.get(0)[0]);
+				item.setVariant((Long) variants.get(0)[1]);
+			} else {
+				List<Long> products = em.createQuery(
+						"select p.id from Product p where p.sku = :s and p.merchantStore.id = :m", Long.class)
+						.setParameter("s", line.getSku()).setParameter("m", storeId).setMaxResults(1).getResultList();
+				if (products.isEmpty()) {
+					LOGGER.warn("Order {} line with sku {} no longer matches a product; stock not returned",
+							order.getId(), line.getSku());
+					continue;
+				}
+				item.setProductId(products.get(0));
+			}
+			items.add(item);
+		}
+		return items;
 	}
 
 	/**
