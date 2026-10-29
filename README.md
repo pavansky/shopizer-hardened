@@ -26,6 +26,13 @@ The architecture is kept on purpose. This is the same modular monolith, with cor
 
 Every row links to a defect with file and line in [docs/FIXES.md](docs/FIXES.md).
 
+## Demo day
+
+The whole platform runs locally with one command: API, MySQL, admin, storefront, backups with a restore drill, Prometheus alerts, Grafana and a mail catcher. See [deploy/README.md](deploy/README.md). A full clean-stack rehearsal is recorded in [docs/demo-rehearsal.txt](docs/demo-rehearsal.txt).
+
+- [docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md): how the same containers run in production, backups and recovery targets, scaling, costs, and the Postgres decision.
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md): measured latency, where the time goes, and where Rust would and would not help.
+
 ## Read in this order
 
 1. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): before and after diagrams for security, checkout, payments and runtime.

@@ -1,0 +1,56 @@
+# Demo rehearsal on a clean stack (2026-10-29T05:44Z)
+
+## scripts/demo-checkout.sh
+== Default access
+anonymous DELETE /api/v1/products/group/x  -> 401   (3.2.7: 200)
+anonymous POST  /actuator/loggers/ROOT     -> 401   (3.2.7: 204)
+== Admin login (token carries token_type=admin)
+== Catalog setup
+category by slug /api/v1/category/furniture -> 200   (3.2.7: 500)
+== Checkout with Idempotency-Key
+first attempt : HTTP 200 order id 1 
+retry, same key: HTTP 200 order id 1 
+same key, other cart: HTTP 409 order id - Idempotency-Key was already used for a different cart
+== Refunds (order 1, total 249.00)
+partial 100.00     : HTTP 200 REFUND CA$100.00 
+over-refund 200.00 : HTTP 400   Refund amount must be greater than 0 and at most 149.00, was 200.00
+remaining (no body): HTTP 200 REFUND CA$149.00 
+nothing left       : HTTP 409   Order id [1] is already fully refunded
+== Orders recorded
+ order 1 REFUNDED
+stock left for oak-bench (started at 5):
+ quantity 4
+
+## Order emails caught by Mailpit
+messages: 2
+ - Shopizer - Order confirmation: 1 -> test.buyer@example.com
+ - Shopizer - Order confirmation: 1 -> contact@shopizer.com
+
+## scripts/simulate-stuck-order.sh 1
+before: PAYMENT_PENDING / attempt UNKNOWN
+waiting for the reconciler (RECONCILE_DELAY_MS=30000)...
+after:  PAYMENT_REVIEW
+api-1  | 2026-10-29 05:45:00.076 ERROR 1 --- [   scheduling-1] c.s.c.b.s.o.r.PendingOrderReconciler     : Order 1 moved to PAYMENT_REVIEW: payment attempt 8c022f0f-0a9d-4904-bbc4-8d6dddf9aa41 has no gateway answer after 1440 minutes (PENDING (module moneyorder has no status lookup)). Check the gateway and settle the order by hand.
+api-1  | 2026-10-29 05:45:00.076  INFO 1 --- [   scheduling-1] c.s.c.b.s.o.r.PendingOrderReconciler     : Pending order reconciliation: 0 finalised (0 confirmed by gateway), 0 marked PAYMENT_FAILED, 1 moved to PAYMENT_REVIEW, 0 waiting for the gateway, 0 already settled, 0 errors
+
+## Backup and restore drill
+backup-1  | backup ok 20261029T054615Z 40K
+newest dump: backup/dumps/SALESMANAGER-20261029T054615Z.sql.gz
+SALESMANAGER-20261029T054615Z.sql.gz: OK
+mysqld is alive
+restored in 1s
+ORDERS           live=1      restored=1      OK
+ORDER_PRODUCT    live=1      restored=1      OK
+SM_TRANSACTION   live=0      restored=0      OK
+PAYMENT_ATTEMPT  live=1      restored=1      OK
+PRODUCT          live=1      restored=1      OK
+CUSTOMER         live=3      restored=3      OK
+tables restored: 92
+RESTORE DRILL PASSED
+
+## Prometheus alerts
+  OrdersNeedPaymentReview -> firing
+  LateChargeNotCompensated -> inactive
+  ReconcilerErrors -> inactive
+  CheckoutServerErrors -> inactive
+  ApiDown -> inactive
