@@ -66,6 +66,8 @@ Each row is a defect found in Shopizer 3.2.7 (commit 6a4a0a6, tagged `baseline-3
 | 38 | Timeout treated as a decline | `OrderServiceImpl.process` | Order failed and stock released while the customer may have been charged | Unknown outcomes keep the order `PAYMENT_PENDING`; API answers 202; `PAYMENT_REVIEW` after a day | `OrderServiceImplCheckoutTest`, `PendingOrderReconcilerTest` |
 | 39 | Orphan charges on failed or cancelled orders | reconciler | Money taken for an order the shop gave up on | Second pass voids or refunds through the module with a `comp-` idempotency key; otherwise logged and counted | `PendingOrderReconcilerTest`, `Stripe3StatusLookupTest` |
 | 40 | No gateway push path: outcomes only learned by polling | none | Orders wait for the next reconciler run | Signed Stripe webhook that re-verifies with the gateway and settles one order | `StripeWebhookApiTest` |
+| 41 | Legacy Stripe Charge module had no gateway lookup | `StripePayment.lookup` | Every unclear Charge-API order waited a day and went to manual review; late charges were never returned | Lookup through the Charge search API on `metadata['attempt_ref']` (captured, held, pending, failed, refunded, not found); NOT_FOUND only counts after `notFoundSafeMinutes` because the search index lags; compensation refunds with a `comp-` idempotency key | `StripeChargeLookupTest`, `StripeChargeSandboxIT` |
+| 42 | Gateway SDKs years out of date (stripe-java 19.5.0, braintree-java 2.73.0) | `pom.xml` | Old pinned Stripe API version; no Charge search; missing fixes | stripe-java 34.0.0 (API version 2026-09-30.endive), braintree-java 3.55.1, gson 2.10.1; capture sends `statement_descriptor_suffix` because card payments reject a full descriptor on current API versions | Whole suite, `*SandboxIT` with `-Psandbox` |
 
 Admin defects, fixed in [shopizer-admin-hardened](https://github.com/pavansky/shopizer-admin-hardened): Braintree form values, retry of POST requests, 1-based pager on a 0-based API, password reset hard-coded to DEFAULT, malformed `env.js` and `/api/api/v1` default, and an unreproducible build with no lockfile.
 
@@ -80,7 +82,7 @@ These came up when running the fixed build end to end, and are fixed in the same
 
 ## How it was verified
 
-- `mvn verify`: 201 tests, 0 failures (21 skipped are upstream `@Ignore`).
+- `mvn verify`: 212 tests, 0 failures (21 skipped are upstream `@Ignore`).
 - [scripts/demo-checkout.sh](../scripts/demo-checkout.sh) against a fresh instance. Output: [demo-output.txt](demo-output.txt).
 - `mysql` profile on an empty MySQL 8 database: Flyway applies V1 to V3, Hibernate validates the mapping, and the application starts.
 - Real MySQL 8: Flyway applies V1 to V4, the demo passes, and a simulated crash (order `PAYMENT_PENDING`, attempt `UNKNOWN`, two days old) is moved to `PAYMENT_REVIEW` by the reconciler instead of being failed.

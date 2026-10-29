@@ -90,6 +90,21 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/actuator/
 
 That returned 204 on 3.2.7 and now returns 401.
 
+## Proving payments against real sandboxes
+
+The normal build never touches the network. A separate profile runs the real module classes and the reconciler-facing lookup and compensation calls against the Stripe test mode and the Braintree sandbox: Stripe PaymentIntents (automatic and manual capture, partial and full refund, compensation, decline, unknown reference), legacy Stripe charges (search lookup, compensation) and Braintree (sale, lookup by order id, void, refund after a forced settle, decline). Each check prints one `[sandbox-proof]` line with ids, statuses and amounts, never keys.
+
+```bash
+export STRIPE_TEST_SECRET_KEY=sk_test_...          # test-mode key only; anything else is refused
+export BRAINTREE_SANDBOX_MERCHANT_ID=...
+export BRAINTREE_SANDBOX_PUBLIC_KEY=...
+export BRAINTREE_SANDBOX_PRIVATE_KEY=...
+mvn -B -Psandbox verify | tee sandbox.log
+grep '\[sandbox-proof\]' sandbox.log
+```
+
+A gateway whose variables are missing is skipped, not failed. In GitHub the [sandbox workflow](.github/workflows/sandbox.yml) runs weekly and on demand with repository secrets of the same four names: `STRIPE_TEST_SECRET_KEY`, `BRAINTREE_SANDBOX_MERCHANT_ID`, `BRAINTREE_SANDBOX_PUBLIC_KEY`, `BRAINTREE_SANDBOX_PRIVATE_KEY`.
+
 ## Companion repository
 
 The Angular admin fixes live in [pavansky/shopizer-admin-hardened](https://github.com/pavansky/shopizer-admin-hardened): valid Braintree transaction types, safe retries, the 0-based orders pager, store-aware password reset, a working runtime config and a reproducible build.
@@ -98,7 +113,7 @@ The Angular admin fixes live in [pavansky/shopizer-admin-hardened](https://githu
 
 This used to be a known limit. It is now closed.
 
-- **Payment outcomes come from the gateway.** Every gateway call is written ahead as a payment attempt whose reference goes to the gateway. A timeout keeps the order pending (the API answers 202) instead of failing it. A signed Stripe webhook settles the order within seconds, and the reconciler asks Braintree or Stripe what happened: a confirmed charge is recorded and the order finalised, a late charge on a failed order is voided or refunded, and an order the gateway cannot answer for moves to `PAYMENT_REVIEW` after a day. The legacy Stripe Charge module has no lookup, so its unclear cases always go to review. See [ADR 0011](docs/adr/0011-gateway-is-the-source-of-truth.md).
+- **Payment outcomes come from the gateway.** Every gateway call is written ahead as a payment attempt whose reference goes to the gateway. A timeout keeps the order pending (the API answers 202) instead of failing it. A signed Stripe webhook settles the order within seconds, and the reconciler asks Braintree or Stripe what happened: a confirmed charge is recorded and the order finalised, a late charge on a failed order is voided or refunded, and an order the gateway cannot answer for moves to `PAYMENT_REVIEW` after a day. The legacy Stripe Charge module is looked up through the Stripe search API on the `attempt_ref` metadata; because that index can lag by about a minute, an empty answer only fails an order once the attempt is older than `notFoundSafeMinutes`. See [ADR 0011](docs/adr/0011-gateway-is-the-source-of-truth.md).
 
 ## Deferred on purpose
 
