@@ -505,6 +505,8 @@ public class MultipleEntryPointsSecurityConfig {
 
 					// contact form, newsletter opt-in / opt-out, merchant self sign-up
 					.antMatchers(HttpMethod.POST, v + "/contact", v + "/newsletter", v + "/store/signup").permitAll()
+					// gateway webhooks authenticate with a signature, not a token
+					.antMatchers(HttpMethod.POST, v + "/webhooks/stripe/*").permitAll()
 					.antMatchers(HttpMethod.PUT, v + "/newsletter/*").permitAll()
 					.antMatchers(HttpMethod.DELETE, v + "/newsletter/*").permitAll()
 
