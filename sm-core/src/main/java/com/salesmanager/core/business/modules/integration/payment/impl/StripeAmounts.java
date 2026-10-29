@@ -51,6 +51,16 @@ final class StripeAmounts {
 		return amount.setScale(2, RoundingMode.HALF_EVEN).movePointRight(2).longValueExact();
 	}
 
+	/** Inverse of {@link #toMinorUnits}: Stripe minor units back to an amount in the currency. */
+	static BigDecimal fromMinorUnits(long minor, String isoCode) {
+		Validate.notBlank(isoCode, "currency code cannot be blank");
+		String code = isoCode.trim().toUpperCase();
+		if (ZERO_DECIMAL.contains(code)) {
+			return BigDecimal.valueOf(minor);
+		}
+		return BigDecimal.valueOf(minor).movePointLeft(2);
+	}
+
 	private static BigDecimal wholeUnits(BigDecimal amount, String code) {
 		try {
 			return amount.setScale(0, RoundingMode.UNNECESSARY);

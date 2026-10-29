@@ -14,6 +14,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
@@ -58,6 +59,8 @@ import com.salesmanager.core.model.order.orderproduct.OrderProduct;
 import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.order.orderstatus.OrderStatusHistory;
 import com.salesmanager.core.model.payments.Payment;
+import com.salesmanager.core.model.payments.PaymentAttempt;
+import com.salesmanager.core.modules.integration.PaymentOutcomeUnknownException;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.payments.TransactionType;
 import com.salesmanager.core.model.reference.language.Language;
@@ -154,14 +157,43 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	}
     	order = orderCheckoutSteps.createPendingOrder(order, customer, items, transaction);
 
-    	// 2. charge (outside of any write that could still roll back the order)
+    	// 2. committed step: write-ahead record of the gateway call. Its reference goes to
+    	//    the gateway, so a charge whose Transaction is never stored can still be found.
+    	PaymentAttempt attempt;
+    	try {
+    		attempt = orderCheckoutSteps.beginPaymentAttempt(newAttempt(order, payment, store));
+    	} catch (RuntimeException e) {
+    		// Nothing was sent to the gateway: fail the order now rather than waiting for the reconciler.
+    		LOGGER.error("Could not record the payment attempt of order " + order.getId() + "; not charging", e);
+    		orderCheckoutSteps.markPaymentFailed(order.getId(), items, "payment attempt not recorded", null);
+    		order.setStatus(OrderStatus.PAYMENT_FAILED);
+    		throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Payment could not be started");
+    	}
+    	if (payment.getPaymentMetaData() == null) {
+    		payment.setPaymentMetaData(new HashMap<>());
+    	}
+    	payment.getPaymentMetaData().put(PaymentAttempt.META_ATTEMPT_REF, attempt.getAttemptRef());
+
+    	// 3. charge (outside of any write that could still roll back the order)
     	Transaction processTransaction;
     	try {
     		processTransaction = paymentService.processPayment(customer, store, payment, items, order);
     	} catch (Exception e) {
+    		if (isOutcomeUnknown(e)) {
+    			// Money may have been taken. Keep the order PAYMENT_PENDING and its stock
+    			// reserved; the reconciler asks the gateway and settles it.
+    			LOGGER.error("Payment outcome unknown for order " + order.getId() + " (attempt "
+    					+ attempt.getAttemptRef() + "); left in PAYMENT_PENDING for reconciliation", e);
+    			try {
+    				orderCheckoutSteps.markPaymentOutcomeUnknown(attempt.getId(), describe(e));
+    			} catch (RuntimeException markFailure) {
+    				LOGGER.error("Could not mark payment attempt " + attempt.getAttemptRef() + " UNKNOWN", markFailure);
+    			}
+    			throw new PaymentConfirmationPendingException(order.getId(), e);
+    		}
     		LOGGER.warn("Payment failed for order " + order.getId(), e);
     		try {
-    			orderCheckoutSteps.markPaymentFailed(order.getId(), items, e.getMessage());
+    			orderCheckoutSteps.markPaymentFailed(order.getId(), items, e.getMessage(), attempt.getId());
     		} catch (RuntimeException markFailure) {
     			LOGGER.error("Could not mark order " + order.getId() + " as PAYMENT_FAILED", markFailure);
     		}
@@ -172,11 +204,11 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     		throw new ServiceException(ServiceException.EXCEPTION_PAYMENT_DECLINED, e.getMessage());
     	}
 
-    	// 3. committed step: mark the order paid and record the payment transaction.
-    	//    If this fails the order stays PAYMENT_PENDING with a captured charge and
-    	//    must be reconciled; it is never silently dropped.
+    	// 4. committed step: mark the order paid, record the payment transaction and the
+    	//    attempt outcome. If this fails the order stays PAYMENT_PENDING with a captured
+    	//    charge and must be reconciled; it is never silently dropped.
     	try {
-    		orderCheckoutSteps.markPaymentSucceeded(order.getId(), finalStatus, processTransaction);
+    		orderCheckoutSteps.markPaymentSucceeded(order.getId(), finalStatus, processTransaction, attempt.getId());
     	} catch (ServiceException | RuntimeException e) {
     		LOGGER.error("Order " + order.getId() + " was charged but could not be marked " + finalStatus
     				+ "; left in PAYMENT_PENDING for reconciliation", e);
@@ -185,6 +217,58 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	order.setStatus(finalStatus);
 
     	return order;
+    }
+
+    private static PaymentAttempt newAttempt(Order order, Payment payment, MerchantStore store) {
+    	PaymentAttempt attempt = new PaymentAttempt();
+    	attempt.setAttemptRef(UUID.randomUUID().toString());
+    	attempt.setOrderId(order.getId());
+    	attempt.setMerchantId(store.getId());
+    	attempt.setModuleCode(payment.getModuleName());
+    	attempt.setAmount(order.getTotal());
+    	if (store.getCurrency() != null) {
+    		attempt.setCurrency(store.getCurrency().getCode());
+    	}
+    	attempt.setGatewayRef(knownGatewayRef(payment));
+    	return attempt;
+    }
+
+    /**
+     * Gateway reference known before the call. For Stripe PaymentIntents the
+     * client sends the intent id as the token, so a lost response can still be
+     * looked up by it.
+     */
+    static String knownGatewayRef(Payment payment) {
+    	if (!"stripe3".equals(payment.getModuleName()) || payment.getPaymentMetaData() == null) {
+    		return null;
+    	}
+    	String token = payment.getPaymentMetaData().get("stripe_token");
+    	if (StringUtils.isBlank(token)) {
+    		token = payment.getPaymentMetaData().get("paymentToken");
+    	}
+    	return StringUtils.startsWith(token, "pi_") ? token : null;
+    }
+
+    /**
+     * True when the failure does not tell whether money was taken: the module
+     * reported an unknown outcome, an IO error or timeout is in the cause chain,
+     * or an unexpected runtime error escaped the module. A ServiceException
+     * (including IntegrationException) is a definitive decline or a refusal
+     * before any money moved.
+     */
+    static boolean isOutcomeUnknown(Throwable e) {
+    	for (Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause()) {
+    		if (t instanceof PaymentOutcomeUnknownException || t instanceof java.io.IOException
+    				|| t instanceof java.util.concurrent.TimeoutException) {
+    			return true;
+    		}
+    	}
+    	return !(e instanceof ServiceException);
+    }
+
+    private static String describe(Throwable e) {
+    	String message = e.getMessage();
+    	return e.getClass().getSimpleName() + (message == null ? "" : ": " + message);
     }
 
     private OrderTotalSummary caculateOrder(OrderSummary summary, Customer customer, final MerchantStore store, final Language language) throws Exception {

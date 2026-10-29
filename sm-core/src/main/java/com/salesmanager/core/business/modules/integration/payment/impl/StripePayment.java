@@ -16,6 +16,7 @@ import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.Order;
 import com.salesmanager.core.model.payments.Payment;
+import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.PaymentType;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.payments.TransactionType;
@@ -23,8 +24,12 @@ import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
 import com.salesmanager.core.model.system.IntegrationConfiguration;
 import com.salesmanager.core.model.system.IntegrationModule;
 import com.salesmanager.core.modules.integration.IntegrationException;
+import com.salesmanager.core.modules.integration.PaymentOutcomeUnknownException;
+import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
-// import com.stripe.exception.APIConnectionException;
+import com.salesmanager.core.modules.integration.payment.model.PaymentStatusLookup;
+import com.stripe.exception.ApiConnectionException;
+import com.stripe.exception.ApiException;
 import com.stripe.exception.AuthenticationException;
 import com.stripe.exception.CardException;
 import com.stripe.exception.InvalidRequestException;
@@ -33,7 +38,7 @@ import com.stripe.model.Charge;
 import com.stripe.model.Refund;
 import com.stripe.net.RequestOptions;
 
-public class StripePayment implements PaymentModule {
+public class StripePayment implements PaymentModule, PaymentStatusLookup {
 	
 	
 	private final static String AUTHORIZATION = "Authorization";
@@ -144,8 +149,13 @@ public class StripePayment implements PaymentModule {
 			chargeParams.put("currency", store.getCurrency().getCode());
 			chargeParams.put("source", token); // obtained with Stripe.js
 			chargeParams.put("description", new StringBuilder().append(TRANSACTION).append(" - ").append(store.getStorename()).toString());
-			
-			RequestOptions requestOptions = requestOptions(apiKey);
+			String attemptRef = attemptRef(payment);
+			if (attemptRef != null) {
+				chargeParams.put("metadata", java.util.Collections.singletonMap("attempt_ref", attemptRef));
+			}
+
+			// idempotency key = attempt reference: a replayed request never charges twice
+			RequestOptions requestOptions = requestOptions(apiKey, attemptRef);
 			
 			
 			Charge ch = Charge.create(chargeParams, requestOptions);
@@ -283,8 +293,13 @@ public class StripePayment implements PaymentModule {
 			chargeParams.put("currency", store.getCurrency().getCode());
 			chargeParams.put("source", token); // obtained with Stripe.js
 			chargeParams.put("description", new StringBuilder().append(TRANSACTION).append(" - ").append(store.getStorename()).toString());
-			
-			RequestOptions requestOptions = requestOptions(apiKey);
+			String attemptRef = attemptRef(payment);
+			if (attemptRef != null) {
+				chargeParams.put("metadata", java.util.Collections.singletonMap("attempt_ref", attemptRef));
+			}
+
+			// idempotency key = attempt reference: a replayed request never charges twice
+			RequestOptions requestOptions = requestOptions(apiKey, attemptRef);
 			
 			
 			Charge ch = Charge.create(chargeParams, requestOptions);
@@ -373,6 +388,13 @@ public class StripePayment implements PaymentModule {
 	}
 	
 	private IntegrationException buildException(Exception ex) {
+
+	if(ex instanceof ApiConnectionException || ex instanceof ApiException) {
+		// Network failure or Stripe server error: the charge may have been created.
+		LOGGER.error("Stripe outcome unknown", ex);
+		return new PaymentOutcomeUnknownException("Stripe did not answer clearly: " + ex.getMessage(), ex);
+	}
+
 		
 		
 	if(ex instanceof CardException) {
@@ -564,10 +586,36 @@ public class StripePayment implements PaymentModule {
 	 * Timeouts are inherited from the SDK defaults.
 	 */
 	static RequestOptions requestOptions(String apiKey) {
-		return RequestOptions.builder()
+		return requestOptions(apiKey, null);
+	}
+
+	/** Same as {@link #requestOptions(String)} with an idempotency key when one is given. */
+	static RequestOptions requestOptions(String apiKey, String idempotencyKey) {
+		RequestOptions.RequestOptionsBuilder builder = RequestOptions.builder()
 				.setApiKey(apiKey)
-				.setMaxNetworkRetries(2)
-				.build();
+				.setMaxNetworkRetries(2);
+		if (StringUtils.isNotBlank(idempotencyKey)) {
+			builder.setIdempotencyKey(idempotencyKey);
+		}
+		return builder.build();
+	}
+
+	private static String attemptRef(Payment payment) {
+		if (payment.getPaymentMetaData() == null) {
+			return null;
+		}
+		return StringUtils.trimToNull(payment.getPaymentMetaData().get(PaymentAttempt.META_ATTEMPT_REF));
+	}
+
+	/**
+	 * The legacy Charge API offers no lookup by attempt reference, so the answer
+	 * is always PENDING: the reconciler leaves the order alone and moves it to
+	 * PAYMENT_REVIEW once it is old enough, for a person to check in Stripe.
+	 */
+	@Override
+	public GatewayPaymentStatus lookup(MerchantStore store, IntegrationConfiguration configuration,
+			PaymentAttempt attempt) {
+		return GatewayPaymentStatus.pending(null, "legacy Stripe charges cannot be looked up");
 	}
 
 }

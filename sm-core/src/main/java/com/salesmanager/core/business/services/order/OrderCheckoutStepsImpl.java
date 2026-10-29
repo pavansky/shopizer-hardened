@@ -20,11 +20,15 @@ import org.springframework.transaction.annotation.Transactional;
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.business.services.payments.TransactionService;
+import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
+import com.salesmanager.core.business.services.payments.attempt.PaymentAttempts;
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.order.Order;
 import com.salesmanager.core.model.order.orderproduct.OrderProduct;
 import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.order.orderstatus.OrderStatusHistory;
+import com.salesmanager.core.model.payments.PaymentAttempt;
+import com.salesmanager.core.model.payments.PaymentAttemptStatus;
 import com.salesmanager.core.model.payments.PaymentType;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
@@ -48,6 +52,9 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 
 	@Inject
 	private TransactionService transactionService;
+
+	@Inject
+	private PaymentAttemptService paymentAttemptService;
 
 	@Override
 	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
@@ -84,9 +91,23 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 	}
 
 	@Override
+	public PaymentAttempt beginPaymentAttempt(PaymentAttempt attempt) {
+		// PaymentAttemptService.begin runs in its own REQUIRES_NEW transaction.
+		return paymentAttemptService.begin(attempt);
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public void markPaymentOutcomeUnknown(Long attemptId, String reason) {
+		if (!PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.UNKNOWN, null, reason)) {
+			LOGGER.error("Payment attempt {} not found; cannot mark it UNKNOWN", attemptId);
+		}
+	}
+
+	@Override
 	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
-	public void markPaymentSucceeded(Long orderId, OrderStatus finalStatus, Transaction paymentTransaction)
-			throws ServiceException {
+	public void markPaymentSucceeded(Long orderId, OrderStatus finalStatus, Transaction paymentTransaction,
+			Long attemptId) throws ServiceException {
 		// Compare-and-set in the database: only a PAYMENT_PENDING order can be finalised,
 		// and only once. In-memory copies of the order from earlier in the request may
 		// already carry the target status, so they are not trusted here.
@@ -106,19 +127,14 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 		}
 		order.getOrderHistory().add(history(order, finalStatus, null));
 
-		if (paymentTransaction != null) {
-			paymentTransaction.setOrder(order);
-			if (paymentTransaction.getId() == null || paymentTransaction.getId() == 0) {
-				transactionService.create(paymentTransaction);
-			} else {
-				transactionService.update(paymentTransaction);
-			}
-		}
+		storePayment(order, paymentTransaction);
+		PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.SUCCEEDED, gatewayId(paymentTransaction), null);
 	}
 
 	@Override
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
-	public void markPaymentFailed(Long orderId, List<ShoppingCartItem> items, String reason) {
+	public void markPaymentFailed(Long orderId, List<ShoppingCartItem> items, String reason, Long attemptId) {
+		PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.FAILED, null, reason == null ? "declined" : reason);
 		Order order = em.find(Order.class, orderId);
 		if (order == null) {
 			LOGGER.error("Cannot mark order {} as payment failed: not found", orderId);
@@ -151,7 +167,73 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 
 	@Override
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public boolean reconcileUnpaidOrder(Long orderId, String reason, Long attemptId) {
+		if (!reconcileUnpaid(orderId, reason)) {
+			return false;
+		}
+		PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.FAILED, null, reason);
+		return true;
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+	public boolean reconcileConfirmedPayment(Long orderId, Long attemptId, Transaction paymentTransaction,
+			String comment) throws ServiceException {
+		Order order = em.find(Order.class, orderId);
+		if (order == null) {
+			throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Order " + orderId + " not found");
+		}
+		OrderStatus target = order.getPaymentType() == PaymentType.MONEYORDER ? OrderStatus.ORDERED
+				: OrderStatus.PROCESSED;
+		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, target)) {
+			return false;
+		}
+		em.refresh(order);
+		order.getOrderHistory().add(history(order, target, StringUtils.abbreviate(comment, 250)));
+		if (paymentTransaction != null && paymentTransaction.getPaymentType() == null) {
+			paymentTransaction.setPaymentType(order.getPaymentType());
+		}
+		storePayment(order, paymentTransaction);
+		PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.SUCCEEDED, gatewayId(paymentTransaction), null);
+		return true;
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public boolean moveToPaymentReview(Long orderId, String comment) {
+		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, OrderStatus.PAYMENT_REVIEW)) {
+			return false;
+		}
+		Order order = em.find(Order.class, orderId);
+		em.refresh(order);
+		order.getOrderHistory().add(history(order, OrderStatus.PAYMENT_REVIEW, StringUtils.abbreviate(comment, 250)));
+		return true;
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+	public void recordCompensation(Long orderId, Long attemptId, Transaction refundTransaction, String comment)
+			throws ServiceException {
+		Order order = em.find(Order.class, orderId);
+		if (order == null) {
+			throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Order " + orderId + " not found");
+		}
+		// The order keeps its status (PAYMENT_FAILED or CANCELED); only the ledger and history change.
+		order.getOrderHistory().add(history(order, order.getStatus(), StringUtils.abbreviate(comment, 250)));
+		if (refundTransaction != null && refundTransaction.getPaymentType() == null) {
+			refundTransaction.setPaymentType(order.getPaymentType());
+		}
+		storePayment(order, refundTransaction);
+		PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.FAILED, null, comment);
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public boolean reconcileUnpaidOrder(Long orderId, String reason) {
+		return reconcileUnpaid(orderId, reason);
+	}
+
+	private boolean reconcileUnpaid(Long orderId, String reason) {
 		// The conditional update is the claim: only the instance whose update
 		// matched the PAYMENT_PENDING row goes on to return the stock.
 		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, OrderStatus.PAYMENT_FAILED)) {
@@ -161,6 +243,26 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 		em.refresh(order);
 		recordFailureAndRelease(order, itemsOf(order), reason);
 		return true;
+	}
+
+	private void storePayment(Order order, Transaction transaction) throws ServiceException {
+		if (transaction == null) {
+			return;
+		}
+		transaction.setOrder(order);
+		if (transaction.getId() == null || transaction.getId() == 0) {
+			transactionService.create(transaction);
+		} else {
+			transactionService.update(transaction);
+		}
+	}
+
+	private static String gatewayId(Transaction transaction) {
+		if (transaction == null || transaction.getTransactionDetails() == null) {
+			return null;
+		}
+		String id = transaction.getTransactionDetails().get("TRNORDERNUMBER");
+		return StringUtils.isNotBlank(id) ? id : transaction.getTransactionDetails().get("TRANSACTIONID");
 	}
 
 	private boolean compareAndSet(Long orderId, OrderStatus from, OrderStatus to) {

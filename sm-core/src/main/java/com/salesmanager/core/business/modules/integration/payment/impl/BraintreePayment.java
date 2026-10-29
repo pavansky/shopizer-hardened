@@ -15,12 +15,15 @@ import org.slf4j.LoggerFactory;
 import com.braintreegateway.BraintreeGateway;
 import com.braintreegateway.Environment;
 import com.braintreegateway.Result;
+import com.braintreegateway.ResourceCollection;
 import com.braintreegateway.TransactionRequest;
+import com.braintreegateway.TransactionSearchRequest;
 import com.braintreegateway.ValidationError;
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.Order;
 import com.salesmanager.core.model.payments.Payment;
+import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.PaymentType;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.payments.TransactionType;
@@ -28,9 +31,12 @@ import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
 import com.salesmanager.core.model.system.IntegrationConfiguration;
 import com.salesmanager.core.model.system.IntegrationModule;
 import com.salesmanager.core.modules.integration.IntegrationException;
+import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
+import com.salesmanager.core.modules.integration.payment.model.PaymentCompensation;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
+import com.salesmanager.core.modules.integration.payment.model.PaymentStatusLookup;
 
-public class BraintreePayment implements PaymentModule {
+public class BraintreePayment implements PaymentModule, PaymentStatusLookup, PaymentCompensation {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(BraintreePayment.class);
 
@@ -192,6 +198,11 @@ public class BraintreePayment implements PaymentModule {
         TransactionRequest request = new TransactionRequest()
             .amount(amount)
             .paymentMethodNonce(nonce);
+        String attemptRef = attemptRef(payment);
+        if (attemptRef != null) {
+        	// lets the reconciler find this sale by searching on order id
+        	request.orderId(attemptRef);
+        }
 
         Result<com.braintreegateway.Transaction> result = gateway.transaction().sale(request);
 
@@ -352,6 +363,11 @@ public class BraintreePayment implements PaymentModule {
             .options()
                 .submitForSettlement(true)
                 .done();
+        String attemptRef = attemptRef(payment);
+        if (attemptRef != null) {
+        	// lets the reconciler find this sale by searching on order id
+        	request.orderId(attemptRef);
+        }
 
         Result<com.braintreegateway.Transaction> result = gateway.transaction().sale(request);
 
@@ -500,6 +516,115 @@ public class BraintreePayment implements PaymentModule {
         
         return trx;
 		
+	}
+
+	private static String attemptRef(Payment payment) {
+		if (payment.getPaymentMetaData() == null) {
+			return null;
+		}
+		return StringUtils.trimToNull(payment.getPaymentMetaData().get(PaymentAttempt.META_ATTEMPT_REF));
+	}
+
+	/** Braintree statuses that mean money was taken or is held. */
+	private static final EnumSet<com.braintreegateway.Transaction.Status> SUCCEEDED_STATUSES = EnumSet.of(
+			com.braintreegateway.Transaction.Status.SUBMITTED_FOR_SETTLEMENT,
+			com.braintreegateway.Transaction.Status.SETTLING,
+			com.braintreegateway.Transaction.Status.SETTLED,
+			com.braintreegateway.Transaction.Status.SETTLEMENT_PENDING,
+			com.braintreegateway.Transaction.Status.SETTLEMENT_CONFIRMED,
+			com.braintreegateway.Transaction.Status.AUTHORIZED);
+
+	/** Braintree statuses that mean no money was, or will be, taken. */
+	private static final EnumSet<com.braintreegateway.Transaction.Status> FAILED_STATUSES = EnumSet.of(
+			com.braintreegateway.Transaction.Status.FAILED,
+			com.braintreegateway.Transaction.Status.GATEWAY_REJECTED,
+			com.braintreegateway.Transaction.Status.PROCESSOR_DECLINED,
+			com.braintreegateway.Transaction.Status.VOIDED,
+			com.braintreegateway.Transaction.Status.AUTHORIZATION_EXPIRED,
+			com.braintreegateway.Transaction.Status.SETTLEMENT_DECLINED);
+
+	/**
+	 * Maps one Braintree transaction to the gateway answer. Anything else
+	 * (AUTHORIZING, UNRECOGNIZED, null) is PENDING so a person decides.
+	 */
+	static GatewayPaymentStatus toStatus(com.braintreegateway.Transaction.Status status, String id, BigDecimal amount) {
+		String name = status == null ? null : status.name();
+		if (status != null && SUCCEEDED_STATUSES.contains(status)) {
+			return status == com.braintreegateway.Transaction.Status.AUTHORIZED
+					? GatewayPaymentStatus.authorized(id, amount, name)
+					: GatewayPaymentStatus.succeeded(id, amount, name);
+		}
+		if (status != null && FAILED_STATUSES.contains(status)) {
+			return GatewayPaymentStatus.failed(id, name);
+		}
+		return GatewayPaymentStatus.pending(id, name);
+	}
+
+	@Override
+	public GatewayPaymentStatus lookup(MerchantStore store, IntegrationConfiguration configuration,
+			PaymentAttempt attempt) throws IntegrationException {
+		BraintreeGateway gateway = gateway(configuration);
+		ResourceCollection<com.braintreegateway.Transaction> found = gateway.transaction()
+				.search(new TransactionSearchRequest().orderId().is(attempt.getAttemptRef()));
+		GatewayPaymentStatus best = null;
+		for (com.braintreegateway.Transaction t : found) {
+			GatewayPaymentStatus s = toStatus(t.getStatus(), t.getId(), t.getAmount());
+			// one success wins; a PENDING sale beats a failed retry
+			if (best == null || rank(s) > rank(best)) {
+				best = s;
+			}
+		}
+		return best == null ? GatewayPaymentStatus.notFound() : best;
+	}
+
+	private static int rank(GatewayPaymentStatus s) {
+		switch (s.getOutcome()) {
+		case SUCCEEDED:
+			return 3;
+		case PENDING:
+			return 2;
+		case FAILED:
+			return 1;
+		default:
+			return 0;
+		}
+	}
+
+	@Override
+	public Transaction compensate(MerchantStore store, IntegrationConfiguration configuration, PaymentAttempt attempt,
+			GatewayPaymentStatus status) throws IntegrationException {
+		String id = status.getGatewayTransactionId();
+		if (StringUtils.isBlank(id)) {
+			throw refundException("Can't compensate Braintree attempt " + attempt.getAttemptRef()
+					+ ", no gateway transaction id");
+		}
+		BraintreeGateway gateway = gateway(configuration);
+		com.braintreegateway.Transaction original = gateway.transaction().find(id);
+		com.braintreegateway.Transaction.Status current = original == null ? null : original.getStatus();
+		Result<com.braintreegateway.Transaction> result;
+		if (current != null && VOIDABLE_STATUSES.contains(current)) {
+			result = gateway.transaction().voidTransaction(id);
+		} else if (current != null && REFUNDABLE_STATUSES.contains(current)) {
+			result = gateway.transaction().refund(id);
+		} else {
+			throw refundException("Can't compensate Braintree transaction " + id + " in status " + current);
+		}
+		if (!result.isSuccess()) {
+			throw refundException("Braintree compensation of " + id + " failed: " + result.getMessage());
+		}
+		BigDecimal amount = status.getAmount() != null ? status.getAmount() : attempt.getAmount();
+		Transaction trx = new Transaction();
+		trx.setAmount(amount);
+		trx.setTransactionDate(new Date());
+		trx.setTransactionType(TransactionType.REFUND);
+		trx.setPaymentType(PaymentType.CREDITCARD);
+		String refundId = result.getTarget() == null ? id : result.getTarget().getId();
+		trx.getTransactionDetails().put("TRANSACTIONID", refundId);
+		trx.getTransactionDetails().put("TRNAPPROVED", VOIDABLE_STATUSES.contains(current) ? "VOIDED" : "REFUNDED");
+		trx.getTransactionDetails().put("TRNORDERNUMBER", refundId);
+		trx.getTransactionDetails().put("REFUNDEDTRANSACTION", id);
+		trx.getTransactionDetails().put("MESSAGETEXT", null);
+		return trx;
 	}
 
 }

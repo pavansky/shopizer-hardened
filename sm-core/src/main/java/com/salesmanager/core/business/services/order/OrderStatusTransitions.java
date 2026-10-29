@@ -19,6 +19,9 @@ public final class OrderStatusTransitions {
 
 	static {
 		ALLOWED.put(OrderStatus.PAYMENT_PENDING,
+				EnumSet.of(OrderStatus.ORDERED, OrderStatus.PROCESSED, OrderStatus.PAYMENT_FAILED, OrderStatus.CANCELED,
+						OrderStatus.PAYMENT_REVIEW));
+		ALLOWED.put(OrderStatus.PAYMENT_REVIEW,
 				EnumSet.of(OrderStatus.ORDERED, OrderStatus.PROCESSED, OrderStatus.PAYMENT_FAILED, OrderStatus.CANCELED));
 		ALLOWED.put(OrderStatus.PAYMENT_FAILED, EnumSet.of(OrderStatus.CANCELED));
 		ALLOWED.put(OrderStatus.ORDERED,

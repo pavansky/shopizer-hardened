@@ -49,6 +49,7 @@ import com.salesmanager.shop.model.order.v1.PersistableOrder;
 import com.salesmanager.shop.model.order.v1.ReadableOrderConfirmation;
 import com.salesmanager.shop.populator.customer.ReadableCustomerPopulator;
 import com.salesmanager.core.business.services.order.IllegalOrderStatusTransitionException;
+import com.salesmanager.core.business.services.order.PaymentConfirmationPendingException;
 import com.salesmanager.core.business.services.order.idempotency.IdempotencyConflictException;
 import com.salesmanager.shop.store.api.exception.ErrorEntity;
 import com.salesmanager.shop.store.api.exception.GenericRuntimeException;
@@ -390,6 +391,8 @@ public class OrderApi {
 
 		} catch (IdempotencyConflictException | ResourceNotFoundException e) {
 			throw e;
+		} catch (PaymentConfirmationPendingException e) {
+			throw new PaymentBeingConfirmed(e.getOrderId());
 		} catch (Exception e) {
 			LOGGER.error("Error while processing checkout", e);
 			try {
@@ -466,6 +469,8 @@ public class OrderApi {
 
 		} catch (IdempotencyConflictException e) {
 			throw e;
+		} catch (PaymentConfirmationPendingException e) {
+			throw new PaymentBeingConfirmed(e.getOrderId());
 		} catch (Exception e) {
 			if(e instanceof CredentialsException) {
 				throw new GenericRuntimeException("412","Credentials creation Failed [" + e.getMessage() + "]");
@@ -540,6 +545,36 @@ public class OrderApi {
 	@ResponseBody
 	public ErrorEntity handleIdempotencyConflict(IdempotencyConflictException e) {
 		return error("409", e.getMessage());
+	}
+
+	/**
+	 * The gateway did not answer clearly. The order exists in PAYMENT_PENDING and
+	 * the reconciler settles it with the gateway. 202 Accepted rather than an
+	 * error: the request was taken and must not be retried as a new payment.
+	 * The client polls the order by id.
+	 */
+	@ExceptionHandler(PaymentBeingConfirmed.class)
+	@ResponseStatus(HttpStatus.ACCEPTED)
+	@ResponseBody
+	public ErrorEntity handlePaymentBeingConfirmed(PaymentBeingConfirmed e) {
+		return error(PAYMENT_PENDING_CODE, e.getMessage());
+	}
+
+	static final String PAYMENT_PENDING_CODE = "payment_pending";
+
+	/** Carries the pending order id from the checkout to the 202 handler. */
+	static final class PaymentBeingConfirmed extends RuntimeException {
+		private static final long serialVersionUID = 1L;
+		private final Long orderId;
+
+		PaymentBeingConfirmed(Long orderId) {
+			super("Payment for order " + orderId + " is being confirmed. Do not pay again; check the order status.");
+			this.orderId = orderId;
+		}
+
+		Long getOrderId() {
+			return orderId;
+		}
 	}
 
 	@ExceptionHandler(IllegalOrderStatusTransitionException.class)

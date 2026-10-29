@@ -11,6 +11,8 @@ public enum OrderStatus {
 	PAYMENT_PENDING("payment_pending"),
 	/** Payment was attempted and declined or errored; order kept for audit. */
 	PAYMENT_FAILED("payment_failed"),
+	/** Payment outcome could not be confirmed with the gateway in time; needs a person to decide. */
+	PAYMENT_REVIEW("payment_review"),
 	;
 	
 	private String value;

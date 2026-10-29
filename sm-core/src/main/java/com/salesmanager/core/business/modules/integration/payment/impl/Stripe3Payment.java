@@ -15,6 +15,7 @@ import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.Order;
 import com.salesmanager.core.model.payments.Payment;
+import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.PaymentType;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.payments.TransactionType;
@@ -22,7 +23,13 @@ import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
 import com.salesmanager.core.model.system.IntegrationConfiguration;
 import com.salesmanager.core.model.system.IntegrationModule;
 import com.salesmanager.core.modules.integration.IntegrationException;
+import com.salesmanager.core.modules.integration.PaymentOutcomeUnknownException;
+import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
+import com.salesmanager.core.modules.integration.payment.model.PaymentCompensation;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
+import com.salesmanager.core.modules.integration.payment.model.PaymentStatusLookup;
+import com.stripe.exception.ApiConnectionException;
+import com.stripe.exception.ApiException;
 import com.stripe.exception.AuthenticationException;
 import com.stripe.exception.CardException;
 import com.stripe.exception.InvalidRequestException;
@@ -35,7 +42,7 @@ import com.stripe.param.PaymentIntentCreateParams;
 
 // import com.stripe.exception.APIConnectionException;
 
-public class Stripe3Payment implements PaymentModule {
+public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, PaymentCompensation {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(Stripe3Payment.class);
 
@@ -312,7 +319,9 @@ public class Stripe3Payment implements PaymentModule {
 			*/
 
 			RequestOptions requestOptions = requestOptions(apiKey);
-			
+			// The capture carries the attempt reference as idempotency key, so a retried
+			// or replayed capture never takes the money twice.
+			RequestOptions captureOptions = requestOptions(apiKey, attemptRef(payment));
 
 			PaymentIntent paymentIntent = PaymentIntent.retrieve(token, requestOptions);
 
@@ -328,9 +337,7 @@ public class Stripe3Payment implements PaymentModule {
 							)
 					.build();
 
-			paymentIntent = paymentIntent.capture(params, requestOptions);
-	
-			//Map<String,String> metadata = ch.getMetadata();
+			paymentIntent = paymentIntent.capture(params, captureOptions);
 			
 			
 			transaction.setAmount(amount);
@@ -433,7 +440,12 @@ public class Stripe3Payment implements PaymentModule {
 	}
 
 	private IntegrationException buildException(Exception ex) {
-		
+
+	if(ex instanceof ApiConnectionException || ex instanceof ApiException) {
+		// Network failure or Stripe server error: the request may have been applied.
+		LOGGER.error("Stripe outcome unknown", ex);
+		return new PaymentOutcomeUnknownException("Stripe did not answer clearly: " + ex.getMessage(), ex);
+	}
 		
 	if(ex instanceof CardException) {
 		  CardException e = (CardException)ex;
@@ -624,10 +636,127 @@ public class Stripe3Payment implements PaymentModule {
 	 * Timeouts are inherited from the SDK defaults.
 	 */
 	static RequestOptions requestOptions(String apiKey) {
-		return RequestOptions.builder()
+		return requestOptions(apiKey, null);
+	}
+
+	/** Same as {@link #requestOptions(String)} with an idempotency key when one is given. */
+	static RequestOptions requestOptions(String apiKey, String idempotencyKey) {
+		RequestOptions.RequestOptionsBuilder builder = RequestOptions.builder()
 				.setApiKey(apiKey)
-				.setMaxNetworkRetries(2)
-				.build();
+				.setMaxNetworkRetries(2);
+		if (StringUtils.isNotBlank(idempotencyKey)) {
+			builder.setIdempotencyKey(idempotencyKey);
+		}
+		return builder.build();
+	}
+
+	private static String attemptRef(Payment payment) {
+		if (payment.getPaymentMetaData() == null) {
+			return null;
+		}
+		return StringUtils.trimToNull(payment.getPaymentMetaData().get(PaymentAttempt.META_ATTEMPT_REF));
+	}
+
+	/** Retrieves a PaymentIntent. Protected so tests can stub the network call. */
+	protected PaymentIntent retrievePaymentIntent(String id, RequestOptions requestOptions) throws StripeException {
+		return PaymentIntent.retrieve(id, requestOptions);
+	}
+
+	/** Cancels a PaymentIntent. Protected so tests can stub the network call. */
+	protected PaymentIntent cancelPaymentIntent(PaymentIntent intent, RequestOptions requestOptions)
+			throws StripeException {
+		return intent.cancel(requestOptions);
+	}
+
+	/**
+	 * Maps a PaymentIntent status to the gateway answer: succeeded is captured,
+	 * requires_capture is authorised and held, processing is not final yet,
+	 * canceled and requires_payment_method took no money. Anything else is
+	 * PENDING so a person decides.
+	 */
+	static GatewayPaymentStatus toStatus(PaymentIntent intent, String currency) {
+		String status = intent.getStatus();
+		String id = intent.getId();
+		if ("succeeded".equals(status)) {
+			Long minor = intent.getAmountReceived() != null ? intent.getAmountReceived() : intent.getAmount();
+			return GatewayPaymentStatus.succeeded(id, amount(minor, intent, currency), status);
+		}
+		if ("requires_capture".equals(status)) {
+			Long minor = intent.getAmountCapturable() != null ? intent.getAmountCapturable() : intent.getAmount();
+			return GatewayPaymentStatus.authorized(id, amount(minor, intent, currency), status);
+		}
+		if ("canceled".equals(status) || "requires_payment_method".equals(status)) {
+			return GatewayPaymentStatus.failed(id, status);
+		}
+		return GatewayPaymentStatus.pending(id, status);
+	}
+
+	private static BigDecimal amount(Long minor, PaymentIntent intent, String currency) {
+		String code = StringUtils.isNotBlank(intent.getCurrency()) ? intent.getCurrency() : currency;
+		if (minor == null || StringUtils.isBlank(code)) {
+			return null;
+		}
+		return StripeAmounts.fromMinorUnits(minor, code);
+	}
+
+	@Override
+	public GatewayPaymentStatus lookup(MerchantStore store, IntegrationConfiguration configuration,
+			PaymentAttempt attempt) throws IntegrationException {
+		if (StringUtils.isBlank(attempt.getGatewayRef())) {
+			// Without the PaymentIntent id there was nothing to capture.
+			return GatewayPaymentStatus.notFound();
+		}
+		String apiKey = configuration.getIntegrationKeys().get("secretKey");
+		try {
+			PaymentIntent intent = retrievePaymentIntent(attempt.getGatewayRef(), requestOptions(apiKey));
+			return toStatus(intent, attempt.getCurrency());
+		} catch (InvalidRequestException e) {
+			if ("resource_missing".equals(e.getCode())) {
+				return GatewayPaymentStatus.notFound();
+			}
+			throw new IntegrationException("Stripe lookup of " + attempt.getGatewayRef() + " failed", e);
+		} catch (StripeException e) {
+			throw new IntegrationException("Stripe lookup of " + attempt.getGatewayRef() + " failed", e);
+		}
+	}
+
+	@Override
+	public Transaction compensate(MerchantStore store, IntegrationConfiguration configuration, PaymentAttempt attempt,
+			GatewayPaymentStatus status) throws IntegrationException {
+		String apiKey = configuration.getIntegrationKeys().get("secretKey");
+		String intentId = StringUtils.isNotBlank(status.getGatewayTransactionId()) ? status.getGatewayTransactionId()
+				: attempt.getGatewayRef();
+		RequestOptions options = requestOptions(apiKey, "comp-" + attempt.getAttemptRef());
+		try {
+			Transaction refund = new Transaction();
+			refund.setAmount(status.getAmount() != null ? status.getAmount() : attempt.getAmount());
+			refund.setTransactionDate(new Date());
+			refund.setTransactionType(TransactionType.REFUND);
+			refund.setPaymentType(PaymentType.CREDITCARD);
+			refund.getTransactionDetails().put("REFUNDEDTRANSACTION", intentId);
+			refund.getTransactionDetails().put("MESSAGETEXT", null);
+			if (!status.isCaptured()) {
+				// authorised only: cancelling releases the hold, nothing to refund
+				PaymentIntent intent = retrievePaymentIntent(intentId, requestOptions(apiKey));
+				PaymentIntent canceled = cancelPaymentIntent(intent, options);
+				refund.getTransactionDetails().put("TRANSACTIONID", canceled.getId());
+				refund.getTransactionDetails().put("TRNAPPROVED", canceled.getStatus());
+				refund.getTransactionDetails().put("TRNORDERNUMBER", canceled.getId());
+			} else {
+				Map<String, Object> params = new HashMap<>();
+				params.put("payment_intent", intentId);
+				Map<String, String> metadata = new HashMap<>();
+				metadata.put("attempt_ref", attempt.getAttemptRef());
+				params.put("metadata", metadata);
+				Refund re = createRefund(params, options);
+				refund.getTransactionDetails().put("TRANSACTIONID", re.getId());
+				refund.getTransactionDetails().put("TRNAPPROVED", re.getStatus());
+				refund.getTransactionDetails().put("TRNORDERNUMBER", re.getId());
+			}
+			return refund;
+		} catch (StripeException e) {
+			throw new IntegrationException("Stripe compensation of " + intentId + " failed", e);
+		}
 	}
 
 }

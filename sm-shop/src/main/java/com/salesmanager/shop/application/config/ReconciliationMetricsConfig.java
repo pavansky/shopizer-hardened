@@ -11,7 +11,9 @@ import io.micrometer.core.instrument.MeterRegistry;
 /**
  * Publishes the pending-order reconciler's counts as Micrometer counters, visible at
  * /actuator/prometheus as shopizer_reconciliation_orders_total{outcome=...} and
- * shopizer_idempotency_keys_deleted_total. Alert on outcome="failed" or "error".
+ * shopizer_idempotency_keys_deleted_total. Alert on outcome="error", "review", "lookup_error"
+ * and above all "compensation_needed": that one means a customer was charged for an order
+ * the shop failed and the money has to be returned by hand.
  */
 @Configuration
 public class ReconciliationMetricsConfig {
@@ -22,6 +24,11 @@ public class ReconciliationMetricsConfig {
 		Counter failed = outcome(registry, "failed");
 		Counter skipped = outcome(registry, "skipped");
 		Counter error = outcome(registry, "error");
+		Counter confirmed = outcome(registry, "confirmed_by_gateway");
+		Counter review = outcome(registry, "review");
+		Counter lookupError = outcome(registry, "lookup_error");
+		Counter compensated = outcome(registry, "compensated");
+		Counter compensationNeeded = outcome(registry, "compensation_needed");
 		Counter keys = Counter.builder("shopizer.idempotency.keys.deleted")
 				.description("Expired idempotency keys removed").register(registry);
 		return new ReconciliationMetrics() {
@@ -30,6 +37,11 @@ public class ReconciliationMetricsConfig {
 			public void skipped() { skipped.increment(); }
 			public void error() { error.increment(); }
 			public void keysDeleted(int count) { keys.increment(count); }
+			public void confirmedByGateway() { confirmed.increment(); }
+			public void review() { review.increment(); }
+			public void lookupError() { lookupError.increment(); }
+			public void compensated() { compensated.increment(); }
+			public void compensationNeeded() { compensationNeeded.increment(); }
 		};
 	}
 

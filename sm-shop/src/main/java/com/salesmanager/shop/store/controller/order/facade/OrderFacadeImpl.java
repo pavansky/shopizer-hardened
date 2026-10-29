@@ -1449,6 +1449,10 @@ public class OrderFacadeImpl implements OrderFacade {
 
 			return modelOrder;
 
+		} catch (OrderChargedNotRecordedException e) {
+			// keep the type: the idempotency key is bound to this order and the API maps
+			// PaymentConfirmationPendingException to 202
+			throw e;
 		} catch (Exception e) {
 
 			throw new ServiceException(e);
