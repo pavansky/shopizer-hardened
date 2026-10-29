@@ -1,0 +1,24 @@
+groups:
+  - name: shopizer-payments
+    rules:
+      - alert: OrdersNeedPaymentReview
+        expr: increase(shopizer_reconciliation_orders_total{outcome="review"}[1h]) > 0
+        labels: { severity: page }
+        annotations: { summary: "Orders moved to PAYMENT_REVIEW: a person must check the gateway" }
+      - alert: LateChargeNotCompensated
+        expr: increase(shopizer_reconciliation_orders_total{outcome="compensation_needed"}[1h]) > 0
+        labels: { severity: page }
+        annotations: { summary: "A charge on a failed order could not be refunded automatically" }
+      - alert: ReconcilerErrors
+        expr: increase(shopizer_reconciliation_orders_total{outcome=~"error|lookup_error"}[30m]) > 5
+        labels: { severity: ticket }
+        annotations: { summary: "Reconciler cannot reach a gateway or the database" }
+      - alert: CheckoutServerErrors
+        expr: sum(rate(http_server_requests_seconds_count{uri=~".*checkout.*",status=~"5.."}[5m])) > 0.1
+        labels: { severity: page }
+        annotations: { summary: "Checkout is returning 5xx" }
+      - alert: ApiDown
+        expr: up{job="shopizer-api"} == 0
+        for: 2m
+        labels: { severity: page }
+        annotations: { summary: "Prometheus cannot scrape the API" }

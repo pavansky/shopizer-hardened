@@ -1,0 +1,6 @@
+apiVersion: 1
+providers:
+  - name: shopizer
+    folder: Shopizer
+    type: file
+    options: { path: /var/lib/grafana/dashboards }

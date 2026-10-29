@@ -1,0 +1,5 @@
+**/target
+**/node_modules
+.git
+deploy/backup/dumps
+*.h2.db
