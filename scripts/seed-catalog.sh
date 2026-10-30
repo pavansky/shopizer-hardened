@@ -7,15 +7,19 @@
 # 4 attributes (one value from each of color, size, material and finish), 3 variants
 # (color variations) and 3 images, plus a 400-character description.
 # Tune with environment variables:
-#   PRODUCTS=1000 CATEGORIES=20 ATTRIBUTES=4 VARIANTS=3 IMAGES=3 WORKERS=4
+#   PRODUCTS=1000 START=1 CATEGORIES=20 ATTRIBUTES=4 VARIANTS=3 IMAGES=3 WORKERS=4
 #   ADMIN_USER=admin@shopizer.com ADMIN_PASSWORD=password STORE=DEFAULT
-# Keep WORKERS small. Each product write holds a pooled connection for the whole request,
-# and the table-based id generator borrows a second one while it holds a JVM-wide lock;
-# with 8 writers and slow requests the 15-connection mysql pool stalled in testing.
+# SKUs are seed-00001 and up; START moves the first number, so a second run with other
+# sizes (for example START=2001 PRODUCTS=1 IMAGES=10 VARIANTS=5) adds richer products.
+# Keep WORKERS small. A product write is a long transaction, and the table-based id
+# generator borrows a second connection while it holds a JVM-wide lock; with 8 writers
+# and slow requests the 15-connection mysql pool stalled in testing.
 #
 # Safe to re-run: options, values, variations and categories are looked up before they
-# are created, and a product whose SKU already exists is skipped. It does not touch the
-# oak-bench product or the furniture category that scripts/demo-checkout.sh creates.
+# are created. A product whose SKU already exists is looked up and only the attributes,
+# variants and images it is missing are added, so a product left half-seeded by a failed
+# run is completed by the next one. It does not touch the oak-bench product or the
+# furniture category that scripts/demo-checkout.sh creates.
 # Products get sortOrder 10 and up, so a demo product with the default 0 still lists first.
 set -euo pipefail
 BASE="${1:-http://localhost:8080}"
@@ -28,6 +32,7 @@ BASE = sys.argv[1].rstrip("/")
 API = BASE + "/api"
 STORE = os.environ.get("STORE", "DEFAULT")
 PRODUCTS = int(os.environ.get("PRODUCTS", "1000"))
+START = int(os.environ.get("START", "1"))
 CATEGORIES = int(os.environ.get("CATEGORIES", "20"))
 ATTRIBUTES = int(os.environ.get("ATTRIBUTES", "4"))
 VARIANTS = int(os.environ.get("VARIANTS", "3"))
@@ -59,7 +64,9 @@ def call(method, path, body=None, raw=None, content_type="application/json", aut
     # writes occasionally fail with a 5xx or time out under concurrency (the image store,
     # and the async product index listener sharing the request's session), so a 5xx or a
     # timeout is retried twice before the product is reported as failed. A retried write
-    # may already have been applied; seed_product accepts the duplicate in that case.
+    # may already have been applied: seed_product looks a product up by SKU when its
+    # create fails, attributes and variants accept the duplicate, and images are counted
+    # again before an upload is repeated (upload_image).
     for attempt in range(3):
         status, result = call_once(method, path, body, raw, content_type, auth, ok)
         if status < 500:
@@ -176,42 +183,79 @@ def ensure_categories():
     return ids
 
 
+def find_product(sku):
+    s, b = call("GET", f"/v2/product/{sku}?store={STORE}&lang=en", auth=False)
+    return b.get("id") if s == 200 else None
+
+
+def count(path, key=None):
+    s, b = call("GET", path)
+    must(s, b, "list " + path)
+    return b.get(key, 0) if key else len(b)
+
+
+def upload_image(pid, sku, k, expected_before):
+    # not retried blindly: an upload that timed out may have been stored, so the images
+    # are counted again before another attempt
+    body, ctype = multipart(f"{sku}-{k}.png", png(int(sku.split("-")[1]) * 10 + k))
+    for attempt in range(3):
+        s, b = call_once("POST", f"/v1/private/product/{pid}/image", None, body, ctype, True, (200, 201))
+        if s in (200, 201):
+            return
+        if count(f"/v1/product/{pid}/images?store={STORE}") > expected_before:
+            return
+        time.sleep(0.5 * (attempt + 1))
+    must(s, b, f"image {k} on {sku}")
+
+
 def seed_product(n, category_ids, value_ids, variation_ids):
     sku = f"seed-{n:05d}"
-    s, b = call("GET", f"/v1/private/product/unique?code={sku}&store={STORE}")
-    if s == 200 and b.get("exists"):
-        return "skipped"
-    cat = category_ids[n % len(category_ids)]
-    cats = [{"id": cat}]
-    if n % 3 == 0 and len(category_ids) > 1:
-        cats.append({"id": category_ids[(n + 7) % len(category_ids)]})
-    name = f"{ADJECTIVES[n % len(ADJECTIVES)]} {CATEGORY_NAMES[n % len(CATEGORY_NAMES)][:-1]} {n}"
-    product = {
-        "identifier": sku, "sku": sku, "visible": True, "shipeable": True, "canBePurchased": True,
-        "price": round(19 + (n * 7.31) % 480, 2), "quantity": 20 + n % 200, "sortOrder": 10 + n,
-        "dateAvailable": "2026-01-01", "categories": cats, "type": "GENERAL",
-        "productSpecifications": {"weight": 5, "height": 40, "width": 60, "length": 50},
-        "descriptions": [{"language": "en", "name": name, "title": name, "friendlyUrl": sku,
-                          "description": LOREM, "metaDescription": LOREM[:150], "keyWords": "seed,catalog"}],
-    }
-    s, b = call("POST", "/v2/private/product", product)
-    pid = must(s, b, "create product " + sku)["id"]
-    for a, code in enumerate(list(OPTIONS)[:ATTRIBUTES]):
-        values = OPTIONS[code]
-        v = values[(n + a) % len(values)]
-        s, b = call("POST", f"/v1/private/product/{pid}/attribute", {"option": {"id": OPTION_IDS[code]},
-                    "optionValue": {"id": value_ids[(code, v)]}, "productAttributePrice": 0, "sortOrder": a})
-        must(s, b, f"attribute {code} on {sku}", duplicate_ok=True)
-    for k in range(VARIANTS):
-        var = variation_ids[(n + k) % len(variation_ids)]
-        s, b = call("POST", f"/v2/private/product/{pid}/variant", {"sku": f"{sku}-v{k}", "variation": var,
-                    "available": True, "dateAvailable": "2026-01-01", "sortOrder": k})
-        must(s, b, f"variant {k} on {sku}", duplicate_ok=True)
-    for k in range(IMAGES):
-        body, ctype = multipart(f"{sku}-{k}.png", png(n * 10 + k))
-        s, b = call("POST", f"/v1/private/product/{pid}/image", raw=body, content_type=ctype)
-        must(s, b, f"image {k} on {sku}")
-    return "created"
+    pid = find_product(sku)
+    result = "skipped"
+    if pid is None:
+        cat = category_ids[n % len(category_ids)]
+        cats = [{"id": cat}]
+        if n % 3 == 0 and len(category_ids) > 1:
+            cats.append({"id": category_ids[(n + 7) % len(category_ids)]})
+        name = f"{ADJECTIVES[n % len(ADJECTIVES)]} {CATEGORY_NAMES[n % len(CATEGORY_NAMES)][:-1]} {n}"
+        product = {
+            "identifier": sku, "sku": sku, "visible": True, "shipeable": True, "canBePurchased": True,
+            "price": round(19 + (n * 7.31) % 480, 2), "quantity": 20 + n % 200, "sortOrder": 10 + n,
+            "dateAvailable": "2026-01-01", "categories": cats, "type": "GENERAL",
+            "productSpecifications": {"weight": 5, "height": 40, "width": 60, "length": 50},
+            "descriptions": [{"language": "en", "name": name, "title": name, "friendlyUrl": sku,
+                              "description": LOREM, "metaDescription": LOREM[:150], "keyWords": "seed,catalog"}],
+        }
+        s, b = call("POST", "/v2/private/product", product)
+        if s in (200, 201) and b.get("id"):
+            pid = b["id"]
+        else:
+            # a retried create may have gone through the first time
+            pid = find_product(sku)
+            if pid is None:
+                must(s, b, "create product " + sku)
+        result = "created"
+
+    if count(f"/v1/private/product/{pid}/attributes?store={STORE}&lang=en", "recordsTotal") < ATTRIBUTES:
+        for a, code in enumerate(list(OPTIONS)[:ATTRIBUTES]):
+            values = OPTIONS[code]
+            v = values[(n + a) % len(values)]
+            s, b = call("POST", f"/v1/private/product/{pid}/attribute", {"option": {"id": OPTION_IDS[code]},
+                        "optionValue": {"id": value_ids[(code, v)]}, "productAttributePrice": 0, "sortOrder": a})
+            must(s, b, f"attribute {code} on {sku}", duplicate_ok=True)
+        result = result if result == "created" else "completed"
+    if count(f"/v2/private/product/{pid}/variants?store={STORE}&lang=en", "recordsTotal") < VARIANTS:
+        for k in range(VARIANTS):
+            var = variation_ids[(n + k) % len(variation_ids)]
+            s, b = call("POST", f"/v2/private/product/{pid}/variant", {"sku": f"{sku}-v{k}", "variation": var,
+                        "available": True, "dateAvailable": "2026-01-01", "sortOrder": k})
+            must(s, b, f"variant {k} on {sku}", duplicate_ok=True)
+        result = result if result == "created" else "completed"
+    have = count(f"/v1/product/{pid}/images?store={STORE}")
+    for k in range(have, IMAGES):
+        upload_image(pid, sku, k, k)
+        result = result if result == "created" else "completed"
+    return result
 
 
 started = time.time()
@@ -222,7 +266,7 @@ CATEGORY_IDS = ensure_categories()
 print(f"options {len(OPTION_IDS)}, values {len(VALUE_IDS)}, variations {len(VARIATION_IDS)}, "
       f"categories {len(CATEGORY_IDS)}", flush=True)
 
-counts = {"created": 0, "skipped": 0, "failed": 0}
+counts = {"created": 0, "completed": 0, "skipped": 0, "failed": 0}
 lock = threading.Lock()
 
 
@@ -240,11 +284,12 @@ def work(n):
 
 
 with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-    for f in [pool.submit(work, n) for n in range(1, PRODUCTS + 1)]:
+    for f in [pool.submit(work, n) for n in range(START, START + PRODUCTS)]:
         f.result()
 
 s, b = call("GET", f"/v1/products?store={STORE}&lang=en&count=1", auth=False)
-print(f"done in {time.time() - started:.0f}s: created {counts['created']}, skipped {counts['skipped']}, "
+print(f"done in {time.time() - started:.0f}s: created {counts['created']}, completed {counts['completed']}, "
+      f"skipped {counts['skipped']}, "
       f"failed {counts['failed']}; "
       f"storefront recordsTotal {b.get('recordsTotal')}")
 PY
