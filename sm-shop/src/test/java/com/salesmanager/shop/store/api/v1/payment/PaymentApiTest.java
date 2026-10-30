@@ -28,6 +28,7 @@ import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.shop.constants.Constants;
 import com.salesmanager.shop.model.system.IntegrationModuleConfiguration;
+import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.api.exception.UnauthorizedException;
 import com.salesmanager.shop.store.facade.payment.PaymentConfigurationChangeNotifier;
 import com.salesmanager.shop.store.facade.payment.PaymentModuleConfigurationFacade;
@@ -92,6 +93,17 @@ class PaymentApiTest {
 		assertThrows(UnauthorizedException.class, () -> api.configure(configuration, store));
 		assertThrows(UnauthorizedException.class, () -> api.paymentModule("stripe", store, null));
 		assertThrows(UnauthorizedException.class, () -> api.paymentModules(store, null));
+
+		verifyNoInteractions(facade, notifier, paymentService);
+	}
+
+	@Test
+	void userLookupFailureDuringAuthorizationIsForbiddenNotServerError() throws Exception {
+		when(authorizationUtils.authenticatedUser()).thenReturn("deleted@shopizer.com");
+		doThrow(new ResourceNotFoundException("User [deleted@shopizer.com] not found")).when(authorizationUtils)
+				.authorizeUser(eq("deleted@shopizer.com"), anyList(), any());
+
+		assertThrows(UnauthorizedException.class, () -> api.paymentModule("stripe", store, null));
 
 		verifyNoInteractions(facade, notifier, paymentService);
 	}

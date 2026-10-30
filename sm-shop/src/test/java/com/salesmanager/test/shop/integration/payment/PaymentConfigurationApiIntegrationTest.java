@@ -192,15 +192,20 @@ public class PaymentConfigurationApiIntegrationTest extends ServicesTestSupport 
 
 	@Test
 	public void adminOfAnotherStoreGetsForbidden() throws Exception {
+		// seed a known configuration so the no-write check below compares real values
+		assertEquals(HttpStatus.OK,
+				post(stripe(SECRET, PUBLISHABLE), getHeader(), Constants.DEFAULT_STORE).getStatusCode());
+		IntegrationConfiguration before = stored();
+		assertEquals(SECRET, before.getIntegrationKeys().get("secretKey"));
+
 		HttpHeaders otherAdmin = getHeader(OTHER_STORE_ADMIN, PASSWORD);
 		assertEquals(HttpStatus.FORBIDDEN, read(otherAdmin).getStatusCode());
-		IntegrationConfiguration before = stored();
 		assertEquals(HttpStatus.FORBIDDEN,
-				post(stripe("sk_test_cross_store_0000", PUBLISHABLE), otherAdmin, Constants.DEFAULT_STORE)
-						.getStatusCode());
+				post(stripe("sk_test_cross_store_0000", "pk_test_cross_store_0000"), otherAdmin,
+						Constants.DEFAULT_STORE).getStatusCode());
 		IntegrationConfiguration after = stored();
-		assertEquals(before == null ? null : before.getIntegrationKeys(),
-				after == null ? null : after.getIntegrationKeys());
+		assertEquals(SECRET, after.getIntegrationKeys().get("secretKey"));
+		assertEquals(before.getIntegrationKeys(), after.getIntegrationKeys());
 
 		// its own store is fine
 		assertEquals(HttpStatus.OK, testRestTemplate.exchange(URL + "/moneyorder?store=" + OTHER_STORE,

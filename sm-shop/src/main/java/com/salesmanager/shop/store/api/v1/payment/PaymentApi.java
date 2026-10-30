@@ -155,10 +155,18 @@ public class PaymentApi {
 	/**
 	 * Payment configuration holds gateway credentials, so only store administrators
 	 * may read or change it, and only for their own store (SUPERADMIN for any store).
+	 * A lookup failure during the check (for example a user deleted while the token is
+	 * still valid) is a denial too, so it is reported as 403 and not as a server error.
 	 */
 	private String authorizeStoreAdmin(MerchantStore merchantStore) {
 		String user = authorizationUtils.authenticatedUser();
-		authorizationUtils.authorizeUser(user, ADMIN_GROUPS, merchantStore);
+		try {
+			authorizationUtils.authorizeUser(user, ADMIN_GROUPS, merchantStore);
+		} catch (ServiceRuntimeException e) {
+			LOGGER.warn("Payment configuration authorization failed for [{}]: {}", user, e.getErrorMessage());
+			throw new UnauthorizedException("Cannot authorize user [" + user + "] for store ["
+					+ (merchantStore == null ? null : merchantStore.getCode()) + "]");
+		}
 		return user;
 	}
 
