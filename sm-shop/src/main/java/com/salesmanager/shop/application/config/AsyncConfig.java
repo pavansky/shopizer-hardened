@@ -12,6 +12,8 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import com.salesmanager.core.business.configuration.logging.MdcTaskDecorator;
+
 @Configuration
 @EnableScheduling
 @EnableAsync
@@ -45,6 +47,8 @@ public class AsyncConfig implements AsyncConfigurer {
     executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
     executor.setWaitForTasksToCompleteOnShutdown(true);
     executor.setAwaitTerminationSeconds(awaitTerminationSeconds);
+    // @Async work (order emails) logs with the request id of the request that started it
+    executor.setTaskDecorator(new MdcTaskDecorator());
     return executor;
   }
 

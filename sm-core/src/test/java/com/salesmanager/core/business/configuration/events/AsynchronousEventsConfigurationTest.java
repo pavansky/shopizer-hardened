@@ -8,6 +8,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
+import org.slf4j.MDC;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 public class AsynchronousEventsConfigurationTest {
@@ -31,6 +32,20 @@ public class AsynchronousEventsConfigurationTest {
 			assertEquals(Thread.currentThread().getName(), ranOn[0]);
 			release.countDown();
 		} finally {
+			executor.shutdown();
+		}
+	}
+
+	@Test
+	public void listenersRunWithThePublishersRequestId() throws Exception {
+		ThreadPoolTaskExecutor executor = AsynchronousEventsConfiguration.buildExecutor(1, 1, 1, 5);
+		executor.initialize();
+		try {
+			MDC.put("requestId", "req-events");
+			String seen = executor.submit(() -> MDC.get("requestId")).get(5, TimeUnit.SECONDS);
+			assertEquals("req-events", seen);
+		} finally {
+			MDC.clear();
 			executor.shutdown();
 		}
 	}
