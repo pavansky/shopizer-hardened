@@ -10,6 +10,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 
@@ -26,46 +27,60 @@ public class JWTAdminAuthenticationProvider extends DaoAuthenticationProvider {
     @Inject
     private PasswordEncoder passwordEncoder;
 
+    static final String BAD_CREDENTIALS = "Bad credentials";
+
+    private volatile String dummyHash;
+
 	public UserDetailsService getJwtAdminDetailsService() {
 		return jwtAdminDetailsService;
 	}
 	public void setJwtAdminDetailsService(UserDetailsService jwtAdminDetailsService) {
 		this.jwtAdminDetailsService = jwtAdminDetailsService;
 	}
+	/**
+	 * Every failure (unknown user, missing or wrong password, deactivated user)
+	 * throws the same BadCredentialsException, so the login response does not
+	 * tell an attacker which usernames exist or which accounts are disabled.
+	 */
 	@Override
     public Authentication authenticate(Authentication authentication) throws AuthenticationException {
         UsernamePasswordAuthenticationToken auth = (UsernamePasswordAuthenticationToken) authentication;
         String name = auth.getName();
         Object credentials = auth.getCredentials();
-        UserDetails user = jwtAdminDetailsService.loadUserByUsername(name);
-        if (user == null) {
-            throw new BadCredentialsException("Username/Password does not match for " + auth.getPrincipal());
+        UserDetails user = null;
+        try {
+            user = jwtAdminDetailsService.loadUserByUsername(name);
+        } catch (UsernameNotFoundException e) {
+            user = null;
         }
-        
-        if (credentials == null) {
-            throw new BadCredentialsException("Username/Password does not match for " + auth.getPrincipal());
+
+        if (user == null || credentials == null) {
+            // spend the same hashing time as a real check
+            passwordEncoder.matches(credentials == null ? "" : credentials.toString(), dummyHash());
+            throw new BadCredentialsException(BAD_CREDENTIALS);
         }
 
         // Compare the submitted password with the stored (encoded) password hash.
-        // The previous code compared it with the username.
-        if(!passwordMatch(credentials.toString(), user.getPassword())) {
-        	throw new BadCredentialsException("Username/Password does not match for " + auth.getPrincipal());
+        if (!passwordMatch(credentials.toString(), user.getPassword()) || !user.isEnabled()) {
+            throw new BadCredentialsException(BAD_CREDENTIALS);
         }
-        
-        
-        /**
-         * username password auth
-         */
 
-        
         return new UsernamePasswordAuthenticationToken(user, credentials, user.getAuthorities());
     }
-	
-	
+
+    private String dummyHash() {
+        String hash = dummyHash;
+        if (hash == null) {
+            hash = passwordEncoder.encode("unused-password-for-timing");
+            dummyHash = hash;
+        }
+        return hash;
+    }
+
     private boolean passwordMatch(String rawPassword, String encodedPassword) {
 		    return encodedPassword != null && passwordEncoder.matches(rawPassword, encodedPassword);
 	}
-	
+
     @Override
     public boolean supports(Class<?> authentication) {
         return true;

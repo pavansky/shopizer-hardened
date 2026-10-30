@@ -162,6 +162,17 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<systemPropertyVariables>
+						<!-- the integration tests log in many times from one address;
+						     the rate limit filter has its own tests -->
+						<shopizer.ratelimit.enabled>false</shopizer.ratelimit.enabled>
+					</systemPropertyVariables>
+				</configuration>
+			</plugin>
 		</plugins>
 		<finalName>shopizer</finalName>
 	</build>

@@ -9,6 +9,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.builders.WebSecurity;
@@ -28,6 +29,8 @@ import com.salesmanager.shop.admin.security.WebUserServices;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.security.AuthenticationTokenFilter;
 import com.salesmanager.shop.store.security.ServicesAuthenticationSuccessHandler;
+import com.salesmanager.shop.store.security.abuse.LockoutAuthenticationProvider;
+import com.salesmanager.shop.store.security.abuse.LoginAttemptTracker;
 import com.salesmanager.shop.store.security.admin.JWTAdminAuthenticationProvider;
 import com.salesmanager.shop.store.security.admin.JWTAdminServicesImpl;
 import com.salesmanager.shop.store.security.customer.JWTCustomerAuthenticationProvider;
@@ -319,11 +322,19 @@ public class MultipleEntryPointsSecurityConfig {
 			super();
 		}
 
+		@Autowired
+		private LoginAttemptTracker loginAttemptTracker;
+
+		/**
+		 * Admin login (POST /private/login and HTTP Basic on this chain) goes
+		 * through one provider only: JWTAdminAuthenticationProvider behind the
+		 * per-account lockout. A second DAO provider used to run as well; it
+		 * answered disabled accounts with a different error than wrong passwords.
+		 */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-		       auth.userDetailsService(jwtUserDetailsService)
-	            .and()
-	            .authenticationProvider(authenticationProvider());
+			auth.authenticationProvider(
+					new LockoutAuthenticationProvider("admin", authenticationProvider(), loginAttemptTracker));
 		}
 		
 		@Override
@@ -397,9 +408,23 @@ public class MultipleEntryPointsSecurityConfig {
 			return super.authenticationManagerBean();
 		}
 
+		@Autowired
+		private PasswordEncoder passwordEncoder;
+
+		@Autowired
+		private LoginAttemptTracker loginAttemptTracker;
+
+		/**
+		 * Customer login: the standard DAO provider (unknown users and wrong
+		 * passwords both fail as bad credentials) behind the per-account lockout.
+		 */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-			auth.userDetailsService(jwtCustomerDetailsService);
+			DaoAuthenticationProvider dao = new DaoAuthenticationProvider();
+			dao.setUserDetailsService(jwtCustomerDetailsService);
+			dao.setPasswordEncoder(passwordEncoder);
+			dao.afterPropertiesSet();
+			auth.authenticationProvider(new LockoutAuthenticationProvider("customer", dao, loginAttemptTracker));
 		}
 
 		@Override
