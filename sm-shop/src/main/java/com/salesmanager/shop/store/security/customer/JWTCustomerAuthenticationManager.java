@@ -63,8 +63,10 @@ public class JWTCustomerAuthenticationManager extends CustomAuthenticationManage
 
         // A customer token is bound to the store it was issued for. A token without
         // a store, or presented to another store, does not authenticate the request.
+        // Store codes are compared without case, the way the MySQL store lookup
+        // resolves them, so ?store=default with a DEFAULT token is the same store.
         String requestStore = AbstractCustomerServices.requestStoreCode(request);
-        if (username != null && (tokenStore == null || !tokenStore.equals(requestStore))) {
+        if (username != null && (tokenStore == null || !tokenStore.equalsIgnoreCase(requestStore))) {
             logger.warn("customer token for store " + tokenStore + " used against store " + requestStore);
             return null;
         }

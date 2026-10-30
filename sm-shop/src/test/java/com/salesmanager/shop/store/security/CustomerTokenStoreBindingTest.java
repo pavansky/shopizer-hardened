@@ -126,6 +126,15 @@ class CustomerTokenStoreBindingTest {
 	}
 
 	@Test
+	void storeCodeCaseDoesNotMatterAndTheCustomerIsLoadedFromTheTokenStore() throws Exception {
+		AbstractCustomerServices uds = mock(AbstractCustomerServices.class);
+		when(uds.loadUserByUsernameAndStore("jane@example.com", "DEFAULT")).thenReturn(CUSTOMER);
+
+		assertNotNull(attempt(uds, util.generateCustomerToken(CUSTOMER, "DEFAULT"), "default"));
+		verify(uds).loadUserByUsernameAndStore("jane@example.com", "DEFAULT");
+	}
+
+	@Test
 	void tokenWithoutStoreClaimIsRefused() throws Exception {
 		AbstractCustomerServices uds = mock(AbstractCustomerServices.class);
 
