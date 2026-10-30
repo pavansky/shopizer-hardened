@@ -65,6 +65,42 @@ public class DataConfiguration {
     @Value("${db.maxPoolSize}")
     private int maxPoolSize;
 
+    /**
+     * How long a request waits for a pooled connection before it fails. Hikari's default
+     * is 30 s, which lets requests pile up behind a saturated pool; failing after 2 s lets
+     * the API answer 503 with Retry-After (RestErrorHandler) while the pool recovers.
+     */
+    @Value("${db.connectionTimeout:2000}")
+    private long connectionTimeout;
+
+    /**
+     * Lazy associations are loaded for up to this many owners in one select. The product
+     * loaders rely on it to replace their collection fetch joins.
+     */
+    @Value("${hibernate.default_batch_fetch_size:50}")
+    private String batchFetchSize;
+
+    /**
+     * true in the test configuration: a query that pages over a collection fetch, which
+     * Hibernate can only page in memory after reading every row (HHH000104), fails.
+     */
+    @Value("${hibernate.query.fail_on_pagination_over_collection_fetch:false}")
+    private String failOnCollectionFetchPagination;
+
+    /**
+     * Spring's HibernateJpaVendorAdapter defaults to DELAYED_ACQUISITION_AND_HOLD: once a
+     * request's EntityManager touched the database it kept the JDBC connection until the
+     * EntityManager closed. With open-in-view that is the end of the request, so a checkout
+     * held a pooled connection while it waited on the payment gateway. Releasing after each
+     * transaction (and after each read outside one) returns it to the pool in between.
+     * Spring still marks the connection read-only for read-only transactions. When the
+     * connection is already back in the pool at cleanup, Spring skips its own reset and
+     * Hikari restores the read-only flag and isolation level when it takes the connection
+     * back. No transaction in the code sets an isolation level.
+     */
+    @Value("${hibernate.connection.handling_mode:DELAYED_ACQUISITION_AND_RELEASE_AFTER_TRANSACTION}")
+    private String connectionHandlingMode;
+
     @Bean
     public HikariDataSource dataSource() {
     	HikariDataSource dataSource = DataSourceBuilder.create().type(HikariDataSource.class)
@@ -75,8 +111,10 @@ public class DataConfiguration {
     	.build();
     	
     	/** Datasource config **/
-    	dataSource.setIdleTimeout(minPoolSize);
+    	// Fixed-size pool, as Hikari recommends: minimumIdle defaults to the maximum. The old
+    	// setIdleTimeout(minPoolSize) passed a pool size as milliseconds and had no effect.
     	dataSource.setMaximumPoolSize(maxPoolSize);
+    	dataSource.setConnectionTimeout(connectionTimeout);
     	dataSource.setConnectionTestQuery(testQuery);
     	
     	return dataSource;
@@ -111,6 +149,9 @@ public class DataConfiguration {
         hibernateProperties.setProperty("hibernate.connection.useUnicode", "true");
         hibernateProperties.setProperty("hibernate.id.new_generator_mappings", "false"); //unless you run on a new schema
         hibernateProperties.setProperty("hibernate.generate_statistics", "false");
+        hibernateProperties.setProperty("hibernate.default_batch_fetch_size", batchFetchSize);
+        hibernateProperties.setProperty("hibernate.query.fail_on_pagination_over_collection_fetch", failOnCollectionFetchPagination);
+        hibernateProperties.setProperty("hibernate.connection.handling_mode", connectionHandlingMode);
         // hibernateProperties.setProperty("hibernate.globally_quoted_identifiers", "true");
         return hibernateProperties;
     }

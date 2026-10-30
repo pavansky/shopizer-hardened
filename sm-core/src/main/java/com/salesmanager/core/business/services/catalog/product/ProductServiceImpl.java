@@ -346,7 +346,7 @@ public class ProductServiceImpl extends SalesManagerEntityServiceImpl<Long, Prod
 	public Page<Product> listByStore(MerchantStore store, Language language, ProductCriteria criteria, int page,
 			int count) {
 
-		criteria.setPageSize(page);
+		criteria.setStartPage(page);
 		criteria.setPageSize(count);
 		criteria.setLegacyPagination(false);
 		

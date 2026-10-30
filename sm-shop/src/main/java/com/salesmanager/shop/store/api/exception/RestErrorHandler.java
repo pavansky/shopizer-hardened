@@ -1,5 +1,6 @@
 package com.salesmanager.shop.store.api.exception;
 
+import java.sql.SQLTransientConnectionException;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -7,7 +8,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -20,10 +23,15 @@ public class RestErrorHandler {
   
     private static final Logger log = LoggerFactory.getLogger(RestErrorHandler.class);
 
+    /** seconds a client should wait before retrying when no database connection was free */
+    static final String POOL_TIMEOUT_RETRY_AFTER_SECONDS = "2";
+
     @RequestMapping(produces = "application/json")
     @ExceptionHandler(Exception.class)
-    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
-    public @ResponseBody ErrorEntity handleServiceException(Exception exception) {
+    public ResponseEntity<ErrorEntity> handleServiceException(Exception exception) {
+        if (isConnectionPoolTimeout(exception)) {
+            return connectionPoolTimeout(exception);
+        }
         log.error(exception.getMessage(), exception);
         Throwable rootCause = exception;
         while (rootCause.getCause() != null && rootCause.getCause() != rootCause) {
@@ -31,7 +39,36 @@ public class RestErrorHandler {
         }
         ErrorEntity errorEntity = createErrorEntity("500", exception.getMessage(),
         		rootCause.getMessage());
-        return errorEntity;
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorEntity);
+    }
+
+    /**
+     * Hikari throws SQLTransientConnectionException when no pooled connection becomes free
+     * within db.connectionTimeout. Services and Spring wrap it (ServiceException,
+     * CannotCreateTransactionException, DataAccessResourceFailureException), so the cause
+     * chain is searched. The request did no work, so it is safe to retry: answer 503 with
+     * Retry-After instead of a 500 or 400 that clients and alerts read as a defect.
+     */
+    static boolean isConnectionPoolTimeout(Throwable exception) {
+        Throwable t = exception;
+        for (int depth = 0; t != null && depth < 20; depth++) {
+            if (t instanceof SQLTransientConnectionException) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+            t = t.getCause();
+        }
+        return false;
+    }
+
+    private ResponseEntity<ErrorEntity> connectionPoolTimeout(Throwable exception) {
+        log.warn("No database connection available, answering 503: " + exception.getMessage());
+        ErrorEntity errorEntity = createErrorEntity("503", "Service temporarily unavailable, retry shortly", null);
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, POOL_TIMEOUT_RETRY_AFTER_SECONDS)
+                .body(errorEntity);
     }
 
 
@@ -40,8 +77,10 @@ public class RestErrorHandler {
      */
     @RequestMapping(produces = "application/json")
     @ExceptionHandler(ServiceRuntimeException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public @ResponseBody ErrorEntity handleServiceException(ServiceRuntimeException exception) {
+    public ResponseEntity<ErrorEntity> handleServiceException(ServiceRuntimeException exception) {
+        if (isConnectionPoolTimeout(exception)) {
+            return connectionPoolTimeout(exception);
+        }
         log.error(exception.getErrorMessage(), exception);
         Throwable rootCause = exception;
         while (rootCause.getCause() != null && rootCause.getCause() != rootCause) {
@@ -49,7 +88,7 @@ public class RestErrorHandler {
         }
         ErrorEntity errorEntity = createErrorEntity(exception.getErrorCode()!=null?exception.getErrorCode():"500", exception.getErrorMessage(),
         		rootCause.getMessage());
-        return errorEntity;
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorEntity);
     }
 
     @RequestMapping(produces = "application/json")
