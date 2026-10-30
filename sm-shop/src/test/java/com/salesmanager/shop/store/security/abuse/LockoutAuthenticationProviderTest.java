@@ -25,7 +25,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
-/** Per-account lockout: N failures lock the account, even the right password then fails the same way. */
+/** Login lockout: N failures lock the account, even the right password then fails the same way. */
 class LockoutAuthenticationProviderTest {
 
 	private static final String USER = "admin@shopizer.com";
@@ -47,7 +47,7 @@ class LockoutAuthenticationProviderTest {
 			}
 			throw new BadCredentialsException("Username/Password does not match");
 		});
-		LoginAttemptTracker tracker = new LoginAttemptTracker(3, 900, 300, now::get);
+		LoginAttemptTracker tracker = new LoginAttemptTracker(3, 900, 300, 6, 300, now::get);
 		provider = new LockoutAuthenticationProvider("admin", delegate, tracker, new ClientIpResolver(""));
 	}
 
@@ -86,11 +86,11 @@ class LockoutAuthenticationProviderTest {
 
 	@Test
 	void usernamesAreCaseInsensitiveAndRealmsAreSeparate() {
-		LoginAttemptTracker tracker = new LoginAttemptTracker(2, 900, 300, now::get);
-		tracker.recordFailure(LoginAttemptTracker.key("admin", "Admin@Shopizer.com"));
-		tracker.recordFailure(LoginAttemptTracker.key("admin", " admin@shopizer.com"));
-		assertTrue(tracker.isLocked(LoginAttemptTracker.key("admin", USER)));
-		assertFalse(tracker.isLocked(LoginAttemptTracker.key("customer", USER)));
+		LoginAttemptTracker tracker = new LoginAttemptTracker(2, 900, 300, 10, 300, now::get);
+		tracker.recordFailure(LoginAttemptTracker.key("admin", "Admin@Shopizer.com"), "a");
+		tracker.recordFailure(LoginAttemptTracker.key("admin", " admin@shopizer.com"), "a");
+		assertTrue(tracker.isLocked(LoginAttemptTracker.key("admin", USER), "a"));
+		assertFalse(tracker.isLocked(LoginAttemptTracker.key("customer", USER), "a"));
 	}
 
 	@Test
@@ -125,5 +125,57 @@ class LockoutAuthenticationProviderTest {
 		// the owner signing in from their own address is not
 		requestFrom("198.51.100.20");
 		assertNotNull(provider.authenticate(good));
+	}
+
+	@Test
+	void failuresSpreadOverManyAddressesLockTheAccountEverywhere() {
+		// per address 3, per account 6: two failures from each of three addresses
+		// never trip a per-address lock but reach the account-wide limit
+		for (String address : new String[] { "203.0.113.1", "203.0.113.2", "203.0.113.3" }) {
+			requestFrom(address);
+			assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+			assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		}
+		reset(delegate);
+
+		requestFrom("198.51.100.20");
+		BadCredentialsException locked = assertThrows(BadCredentialsException.class, () -> provider.authenticate(good));
+		assertEquals("Bad credentials", locked.getMessage());
+		verify(delegate, never()).authenticate(any());
+	}
+
+	@Test
+	void accountWideLockIsShortAndASuccessDoesNotResetIt() {
+		requestFrom("203.0.113.1");
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		requestFrom("203.0.113.2");
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		// the owner signs in in between: the account-wide count keeps running
+		requestFrom("198.51.100.20");
+		assertNotNull(provider.authenticate(good));
+		requestFrom("203.0.113.3");
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+
+		requestFrom("198.51.100.20");
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(good));
+		now.addAndGet(301_000L);
+		assertNotNull(provider.authenticate(good));
+	}
+
+	@Test
+	void aFullTrackerDropsTheOldestKeyInsteadOfIgnoringNewFailures() {
+		LoginAttemptTracker tracker = new LoginAttemptTracker(1, 900, 300, 1, 300, now::get);
+		for (int i = 0; i < LoginAttemptTracker.MAX_KEYS; i++) {
+			tracker.recordFailure(LoginAttemptTracker.key("admin", "junk" + i), "203.0.113.9");
+		}
+		String victim = LoginAttemptTracker.key("admin", USER);
+		tracker.recordFailure(victim, "203.0.113.9");
+		assertTrue(tracker.isLocked(victim, "203.0.113.9"));
+		assertEquals(LoginAttemptTracker.MAX_KEYS, tracker.trackedAddressKeys());
+		// the least recently used key went first
+		assertFalse(tracker.isLocked(LoginAttemptTracker.key("admin", "junk0"), "203.0.113.9"));
 	}
 }

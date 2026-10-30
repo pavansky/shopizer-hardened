@@ -12,16 +12,16 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 
 /**
  * Wraps the provider that checks passwords with a lockout per account and
- * client address.
+ * client address, and a higher one per account alone (see LoginAttemptTracker).
  *
  * Every failure (wrong password, unknown user, disabled user) counts. A locked
  * account fails with the same BadCredentialsException as a wrong password, so
  * the login endpoints return the same status and body in every case.
  *
- * The lock is keyed on the account and the client address (resolved with the
- * trusted-proxy rules), so failures from one address cannot lock the owner out
- * when they sign in from another. Guessing across many addresses is bounded by
- * the per-address rate limits on every login path.
+ * The low threshold is keyed on the account and the client address (resolved
+ * with the trusted-proxy rules), so failures from one address do not lock the
+ * owner out when they sign in from another. The account-wide threshold caps
+ * guessing spread over many addresses.
  */
 public class LockoutAuthenticationProvider implements AuthenticationProvider {
 
@@ -42,19 +42,20 @@ public class LockoutAuthenticationProvider implements AuthenticationProvider {
 
 	@Override
 	public Authentication authenticate(Authentication authentication) throws AuthenticationException {
-		String key = LoginAttemptTracker.key(realm, authentication.getName()) + "|" + clientAddress();
-		if (tracker.isLocked(key)) {
+		String account = LoginAttemptTracker.key(realm, authentication.getName());
+		String address = clientAddress();
+		if (tracker.isLocked(account, address)) {
 			throw new BadCredentialsException(MESSAGE);
 		}
 		Authentication result;
 		try {
 			result = delegate.authenticate(authentication);
 		} catch (AuthenticationException e) {
-			tracker.recordFailure(key);
+			tracker.recordFailure(account, address);
 			throw new BadCredentialsException(MESSAGE);
 		}
 		if (result != null) {
-			tracker.recordSuccess(key);
+			tracker.recordSuccess(account, address);
 		}
 		return result;
 	}

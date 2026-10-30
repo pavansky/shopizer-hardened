@@ -22,7 +22,9 @@ import org.springframework.core.env.Environment;
  *   credentials on the /api/v* /private, /api/v* /auth, /services and /shop chains)
  * shopizer.login.lockout.max-failures=5
  * shopizer.login.lockout.window-seconds=900
- * shopizer.login.lockout.lock-seconds=300
+ * shopizer.login.lockout.lock-seconds=300                 (per account and client address)
+ * shopizer.login.lockout.account-max-failures=20
+ * shopizer.login.lockout.account-lock-seconds=300         (per account, any address, same window)
  * shopizer.security.trusted-proxies=   (empty: X-Forwarded-For is never read)
  * </pre>
  */
@@ -41,8 +43,11 @@ public class AbuseProtectionConfig {
 	public LoginAttemptTracker loginAttemptTracker(
 			@Value("${shopizer.login.lockout.max-failures:5}") int maxFailures,
 			@Value("${shopizer.login.lockout.window-seconds:900}") long windowSeconds,
-			@Value("${shopizer.login.lockout.lock-seconds:300}") long lockSeconds) {
-		return new LoginAttemptTracker(maxFailures, windowSeconds, lockSeconds);
+			@Value("${shopizer.login.lockout.lock-seconds:300}") long lockSeconds,
+			@Value("${shopizer.login.lockout.account-max-failures:20}") int accountMaxFailures,
+			@Value("${shopizer.login.lockout.account-lock-seconds:300}") long accountLockSeconds) {
+		return new LoginAttemptTracker(maxFailures, windowSeconds, lockSeconds, accountMaxFailures,
+				accountLockSeconds);
 	}
 
 	/**
