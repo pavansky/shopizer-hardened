@@ -1,17 +1,23 @@
 package com.salesmanager.shop.store.api.v1.payment;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.salesmanager.core.business.exception.ServiceException;
@@ -22,8 +28,14 @@ import com.salesmanager.core.model.system.IntegrationConfiguration;
 import com.salesmanager.core.model.system.IntegrationModule;
 import com.salesmanager.shop.model.system.IntegrationModuleConfiguration;
 import com.salesmanager.shop.model.system.IntegrationModuleSummaryEntity;
+import com.salesmanager.shop.constants.Constants;
+import com.salesmanager.shop.store.api.exception.ErrorEntity;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.api.exception.ServiceRuntimeException;
+import com.salesmanager.shop.store.api.exception.UnauthorizedException;
+import com.salesmanager.shop.store.facade.payment.PaymentConfigurationChangeNotifier;
+import com.salesmanager.shop.store.facade.payment.PaymentModuleConfigurationFacade;
+import com.salesmanager.shop.utils.AuthorizationUtils;
 
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiImplicitParam;
@@ -48,8 +60,19 @@ public class PaymentApi {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(PaymentApi.class);
 
+	private static final List<String> ADMIN_GROUPS = Arrays.asList(Constants.GROUP_SUPERADMIN, Constants.GROUP_ADMIN);
+
 	@Autowired
 	private PaymentService paymentService;
+
+	@Autowired
+	private PaymentModuleConfigurationFacade paymentModuleConfigurationFacade;
+
+	@Autowired
+	private PaymentConfigurationChangeNotifier changeNotifier;
+
+	@Autowired
+	private AuthorizationUtils authorizationUtils;
 
 	/**
 	 * Get available payment modules
@@ -59,12 +82,13 @@ public class PaymentApi {
 	 * @return
 	 */
 	@GetMapping("/private/modules/payment")
-	@ApiOperation(httpMethod = "GET", value = "List list of payment modules", notes = "Requires administration access", produces = "application/json", response = List.class)
+	@ApiOperation(httpMethod = "GET", value = "List list of payment modules", notes = "Requires ADMIN or SUPERADMIN on the store", produces = "application/json", response = List.class)
 	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT") })
 	public List<IntegrationModuleSummaryEntity> paymentModules(
 			@ApiIgnore MerchantStore merchantStore,
 			@ApiIgnore Language language) {
 
+		authorizeStoreAdmin(merchantStore);
 		try {
 			List<IntegrationModule> modules = paymentService.getPaymentMethods(merchantStore);
 
@@ -81,50 +105,31 @@ public class PaymentApi {
 	}
 
 	@PostMapping(value = "/private/modules/payment")
+	@ApiOperation(httpMethod = "POST", value = "Configure a payment module", notes = "Requires ADMIN or SUPERADMIN on the store."
+			+ " A secret key sent back in its masked form (****1234) keeps the stored value.")
+	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT") })
 	public void configure(
 			@RequestBody IntegrationModuleConfiguration configuration,
 			@ApiIgnore MerchantStore merchantStore) {
-		
+
+		String user = authorizeStoreAdmin(merchantStore);
 		try {
-			
-			List<IntegrationModule> modules = paymentService.getPaymentMethods(merchantStore);
-			
-		    Map<String, IntegrationModule> map = modules.stream()
-		    	      .collect(Collectors.toMap(IntegrationModule::getCode, module -> module));
-		    
-		    IntegrationModule config = map.get(configuration.getCode());
-
-			if (config == null) {
-				throw new ResourceNotFoundException("Payment module [" + configuration.getCode() + "] not found");
+			Set<String> changed = paymentModuleConfigurationFacade.save(configuration, merchantStore, user);
+			if (!changed.isEmpty()) {
+				LOGGER.info("Payment module [{}] of store [{}] changed by [{}]: {}", configuration.getCode(),
+						merchantStore.getCode(), user, changed);
+				changeNotifier.paymentConfigurationChanged(merchantStore.getCode(), configuration.getCode(), user,
+						changed);
 			}
-			
-			Map<String, IntegrationConfiguration> configuredModules = paymentService
-					.getPaymentModulesConfigured(merchantStore);
-			
-			IntegrationConfiguration integrationConfiguration = configuredModules.get(configuration.getCode());
-			
-			if(integrationConfiguration == null) {
-				integrationConfiguration = new IntegrationConfiguration();
-				integrationConfiguration.setModuleCode(configuration.getCode());
-			}
-
-
-			integrationConfiguration.setActive(configuration.isActive());
-			integrationConfiguration.setDefaultSelected(configuration.isDefaultSelected());
-			integrationConfiguration.setIntegrationKeys(configuration.getIntegrationKeys());
-			integrationConfiguration.setIntegrationOptions(configuration.getIntegrationOptions());
-
-			
-			paymentService.savePaymentModuleConfiguration(integrationConfiguration, merchantStore);
 		} catch (ServiceException e) {
-			LOGGER.error("Error getting payment modules", e);
+			LOGGER.error("Error saving payment module", e);
 			throw new ServiceRuntimeException("Error saving payment module", e);
 		}
 
 	}
 
 	/**
-	 * Get merchant payment module details
+	 * Get merchant payment module details. Secret keys are masked.
 	 * 
 	 * @param code
 	 * @param merchantStore
@@ -132,53 +137,55 @@ public class PaymentApi {
 	 * @return
 	 */
 	@GetMapping("/private/modules/payment/{code}")
-	@ApiOperation(httpMethod = "GET", value = "Payment module by code", produces = "application/json", response = List.class)
+	@ApiOperation(httpMethod = "GET", value = "Payment module by code", notes = "Requires ADMIN or SUPERADMIN on the store."
+			+ " Secret keys are returned masked.", produces = "application/json", response = List.class)
 	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT") })
 	public IntegrationModuleConfiguration paymentModule(@PathVariable String code,
 			@ApiIgnore MerchantStore merchantStore, @ApiIgnore Language language) {
 
+		authorizeStoreAdmin(merchantStore);
 		try {
-			
-			// get module
-			IntegrationModule integrationModule = paymentService.getPaymentMethodByCode(merchantStore, code);
-			if (integrationModule == null) {
-				throw new ResourceNotFoundException("Payment module [" + code + "] not found");
-			}
-			
-			IntegrationModuleConfiguration returnConfig = new IntegrationModuleConfiguration();
-			returnConfig.setConfigurable(integrationModule.getConfigurable());
-			returnConfig.setActive(false);
-			returnConfig.setDefaultSelected(false);
-			returnConfig.setCode(code);
-			
-			
-
-			// configured modules
-			IntegrationConfiguration config = paymentService.getPaymentConfiguration(code, merchantStore);
-			
-			if(config == null) {
-				return returnConfig;
-			}
-
-
-			/**
-			 * Build return object for now this is a read copy
-			 */
-
-			
-			returnConfig.setActive(config.isActive());
-			returnConfig.setDefaultSelected(config.isDefaultSelected());
-			returnConfig.setCode(code);
-			returnConfig.setIntegrationKeys(config.getIntegrationKeys());
-			returnConfig.setIntegrationOptions(config.getIntegrationOptions());
-
-			return returnConfig;
-
+			return paymentModuleConfigurationFacade.read(code, merchantStore);
 		} catch (ServiceException e) {
 			LOGGER.error("Error getting payment module [" + code + "]", e);
 			throw new ServiceRuntimeException("Error getting payment module [" + code + "]", e);
 		}
 
+	}
+
+	/**
+	 * Payment configuration holds gateway credentials, so only store administrators
+	 * may read or change it, and only for their own store (SUPERADMIN for any store).
+	 * A user that no longer exists (deleted while the token is still valid) is a denial
+	 * too, so it is reported as 403. Any other failure during the check, such as the
+	 * database being unavailable, is left to propagate as a server error so outages are
+	 * not hidden behind a 403.
+	 */
+	private String authorizeStoreAdmin(MerchantStore merchantStore) {
+		String user = authorizationUtils.authenticatedUser();
+		try {
+			authorizationUtils.authorizeUser(user, ADMIN_GROUPS, merchantStore);
+		} catch (ResourceNotFoundException e) {
+			LOGGER.warn("Payment configuration authorization failed for [{}]: {}", user, e.getErrorMessage());
+			throw new UnauthorizedException("Cannot authorize user [" + user + "] for store ["
+					+ (merchantStore == null ? null : merchantStore.getCode()) + "]");
+		}
+		return user;
+	}
+
+	/**
+	 * These endpoints are only reachable by authenticated users (/private), so a failed
+	 * group or store check here, including the store check made while resolving the
+	 * store parameter, is a 403 and not a 401.
+	 */
+	@ExceptionHandler(UnauthorizedException.class)
+	@ResponseStatus(HttpStatus.FORBIDDEN)
+	public @ResponseBody ErrorEntity forbidden(UnauthorizedException exception) {
+		LOGGER.warn("Payment configuration access denied: {}", exception.getErrorMessage());
+		ErrorEntity errorEntity = new ErrorEntity();
+		errorEntity.setErrorCode("403");
+		errorEntity.setMessage("Not allowed to access the payment configuration of this store");
+		return errorEntity;
 	}
 
 	private IntegrationModuleSummaryEntity integrationModule(IntegrationModule module,

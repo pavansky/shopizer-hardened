@@ -85,7 +85,7 @@ public class PaymentConfigurationFacadeImpl implements ConfigurationsFacade {
 		ReadableConfiguration config = new ReadableConfiguration();
 		config.setActive(source.isActive());
 		config.setCode(source.getModuleCode());
-		config.setKeys(source.getIntegrationKeys());
+		config.setKeys(PaymentConfigurationSecrets.maskKeys(source.getIntegrationKeys()));
 		config.setIntegrationOptions(source.getIntegrationOptions());
 		
 		return config;
