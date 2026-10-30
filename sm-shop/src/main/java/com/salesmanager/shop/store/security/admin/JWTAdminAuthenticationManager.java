@@ -67,7 +67,11 @@ public class JWTAdminAuthenticationManager extends CustomAuthenticationManager {
       // the database compellingly. Again it's up to you ;)
       // Only tokens issued to admin users are accepted here; customer tokens are
       // signed with the same secret and must not grant admin API access.
-      if (userDetails != null && jwtTokenUtil.validateToken(authToken, userDetails, JWTTokenUtil.TOKEN_TYPE_ADMIN)) {
+      // The user is reloaded on every request, so a deactivated admin (USERS.ACTIVE
+      // false) is refused here at once, and validateToken refuses tokens issued
+      // before the last password change.
+      if (userDetails != null && userDetails.isEnabled()
+          && jwtTokenUtil.validateToken(authToken, userDetails, JWTTokenUtil.TOKEN_TYPE_ADMIN)) {
         authentication = new UsernamePasswordAuthenticationToken(userDetails, null,
             userDetails.getAuthorities());
         authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));

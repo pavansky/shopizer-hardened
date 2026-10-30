@@ -21,7 +21,6 @@ import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.user.GroupService;
 import com.salesmanager.core.business.services.user.PermissionService;
 import com.salesmanager.core.business.services.user.UserService;
-import com.salesmanager.core.model.common.audit.AuditSection;
 import com.salesmanager.core.model.user.Group;
 import com.salesmanager.core.model.user.Permission;
 import com.salesmanager.core.model.user.User;
@@ -46,26 +45,32 @@ public class JWTAdminServicesImpl implements UserDetailsService{
 	public final static String ROLE_PREFIX = "ROLE_";//Spring Security 4
 
 
+	/**
+	 * Builds the principal checked on every admin request.
+	 * <ul>
+	 * <li>enabled follows USERS.ACTIVE, so a deactivated admin is refused on the
+	 * next request instead of at token expiry;</li>
+	 * <li>lastPasswordResetDate is the last credentials change, so tokens issued
+	 * before a password change or reset are refused by JWTTokenUtil.validateToken.</li>
+	 * </ul>
+	 */
 	private UserDetails userDetails(String userName, User user, Collection<GrantedAuthority> authorities) {
-        
-		AuditSection section = null;
-		section = user.getAuditSection();
-		Date lastModified = null;
-		//if(section != null) {//does not represent password change
-		//	lastModified = section.getDateModified();
-		//}
-		
 		return new JWTUser(
-        		user.getId(),
-        		userName,
-        		user.getFirstName(),
-        		user.getLastName(),
-                user.getAdminEmail(),
-                user.getAdminPassword(),
-                authorities,
-                true,
-                lastModified
-        );
+				user.getId(),
+				userName,
+				user.getFirstName(),
+				user.getLastName(),
+				user.getAdminEmail(),
+				user.getAdminPassword(),
+				authorities,
+				user.isActive(),
+				toWholeSeconds(user.getCredentialsChangedAt())
+		);
+	}
+
+	/** Token issue times have second precision; compare at the same precision. */
+	static Date toWholeSeconds(Date date) {
+		return date == null ? null : new Date((date.getTime() / 1000L) * 1000L);
 	}
 
 	@Override
