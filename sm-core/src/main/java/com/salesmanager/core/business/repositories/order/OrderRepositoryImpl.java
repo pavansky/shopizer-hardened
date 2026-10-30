@@ -56,7 +56,7 @@ public class OrderRepositoryImpl implements OrderRepositoryCustom {
 		
 
 		if(!StringUtils.isBlank(criteria.getCustomerName())) {
-			String nameQuery =" and o.billing.firstName like:nm or o.billing.lastName like:nm";
+			String nameQuery =" and (o.billing.firstName like:nm or o.billing.lastName like:nm)";
 			countBuilderWhere.append(nameQuery);
 			objectBuilderWhere.append(nameQuery);
 		}
@@ -162,7 +162,7 @@ public class OrderRepositoryImpl implements OrderRepositoryCustom {
 		countBuilderSelect.append(storeQuery);
 		
 		if(!StringUtils.isEmpty(criteria.getCustomerName())) {
-			String nameQuery =  " and o.billing.firstName like:name or o.billing.lastName like:name";
+			String nameQuery =  " and (o.billing.firstName like:name or o.billing.lastName like:name)";
 			objectBuilderWhere.append(nameQuery);
 			countBuilderSelect.append(nameQuery);
 		}
@@ -182,7 +182,7 @@ public class OrderRepositoryImpl implements OrderRepositoryCustom {
 		
 		//phone
 		if(!StringUtils.isEmpty(criteria.getCustomerPhone())) {
-			String nameQuery =  " and o.billing.telephone like:phone or o.delivery.telephone like:phone";
+			String nameQuery =  " and (o.billing.telephone like:phone or o.delivery.telephone like:phone)";
 			objectBuilderWhere.append(nameQuery);
 			countBuilderSelect.append(nameQuery);
 		}
