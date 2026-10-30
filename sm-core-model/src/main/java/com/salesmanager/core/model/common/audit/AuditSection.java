@@ -26,7 +26,9 @@ public class AuditSection implements Serializable {
   @Column(name = "DATE_MODIFIED")
   private Date dateModified;
 
-  @Column(name = "UPDT_ID", length = 60)
+  public static final int MODIFIED_BY_LENGTH = 60;
+
+  @Column(name = "UPDT_ID", length = MODIFIED_BY_LENGTH)
   private String modifiedBy;
 
   public AuditSection() {}
@@ -52,10 +54,9 @@ public class AuditSection implements Serializable {
   }
 
   public void setModifiedBy(String modifiedBy) {
-	  if(!StringUtils.isBlank(modifiedBy)) {//TODO
-		  if(modifiedBy.length()>20) {
-			  modifiedBy = modifiedBy.substring(0, 20);
-		  }
+	  // UPDT_ID is VARCHAR(60); it was cut at 20, which mangled most email usernames
+	  if(!StringUtils.isBlank(modifiedBy) && modifiedBy.length() > MODIFIED_BY_LENGTH) {
+		  modifiedBy = modifiedBy.substring(0, MODIFIED_BY_LENGTH);
 	  }
     this.modifiedBy = modifiedBy;
   }

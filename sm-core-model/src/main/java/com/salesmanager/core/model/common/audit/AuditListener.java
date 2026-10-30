@@ -16,6 +16,7 @@ public class AuditListener {
       if (auditSection.getDateCreated() == null) {
         auditSection.setDateCreated(new Date());
       }
+      stampActor(auditSection);
       audit.setAuditSection(auditSection);
     }
   }
@@ -30,7 +31,16 @@ public class AuditListener {
       if (auditSection.getDateCreated() == null) {
         auditSection.setDateCreated(new Date());
       }
+      stampActor(auditSection);
       audit.setAuditSection(auditSection);
+    }
+  }
+
+  /** The authenticated user, when there is one, is who changed the row. */
+  static void stampActor(AuditSection auditSection) {
+    String actor = AuditActor.current();
+    if (actor != null && !actor.isEmpty()) {
+      auditSection.setModifiedBy(actor);
     }
   }
 }

@@ -22,16 +22,20 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.www.BasicAuthenticationEntryPoint;
+import org.springframework.security.web.access.ExceptionTranslationFilter;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 
+import com.salesmanager.core.business.repositories.system.AdminAuditEventRepository;
 import com.salesmanager.shop.admin.security.UserAuthenticationSuccessHandler;
 import com.salesmanager.shop.admin.security.WebUserServices;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.security.AuthenticationTokenFilter;
 import com.salesmanager.shop.store.security.ServicesAuthenticationSuccessHandler;
+import com.salesmanager.shop.store.security.abuse.ClientIpResolver;
 import com.salesmanager.shop.store.security.abuse.LockoutAuthenticationProvider;
 import com.salesmanager.shop.store.security.abuse.LoginAttemptTracker;
 import com.salesmanager.shop.store.security.admin.JWTAdminAuthenticationProvider;
+import com.salesmanager.shop.store.security.audit.AdminAuditFilter;
 import com.salesmanager.shop.store.security.admin.JWTAdminServicesImpl;
 import com.salesmanager.shop.store.security.customer.JWTCustomerAuthenticationProvider;
 import com.salesmanager.shop.store.security.services.CredentialsService;
@@ -337,6 +341,12 @@ public class MultipleEntryPointsSecurityConfig {
 		@Autowired
 		private LoginAttemptTracker loginAttemptTracker;
 
+		@Autowired
+		private AdminAuditEventRepository adminAuditEventRepository;
+
+		@Autowired
+		private ClientIpResolver clientIpResolver;
+
 		/**
 		 * Admin login (POST /private/login and HTTP Basic on this chain) goes
 		 * through one provider only: JWTAdminAuthenticationProvider behind the
@@ -431,6 +441,9 @@ public class MultipleEntryPointsSecurityConfig {
 					.httpBasic().authenticationEntryPoint(apiAdminAuthenticationEntryPoint())
 					.and()
 					.addFilterAfter(authenticationTokenFilter, BasicAuthenticationFilter.class)
+					// after the token is resolved, before access is decided: denied requests are audited too
+					.addFilterBefore(new AdminAuditFilter(adminAuditEventRepository, clientIpResolver),
+							ExceptionTranslationFilter.class)
 					.csrf().disable();
 
 		}
