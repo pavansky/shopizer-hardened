@@ -122,6 +122,29 @@ public class TaxCalculationGoldenTest extends AbstractSalesManagerCoreTestCase {
 		assertEquals(single("STD", "10.00"), taxes(store, customer(qc, qc), fr, line("100.00", 1, null)));
 	}
 
+	@Test
+	public void provinceRatesOfACountryWithoutZonesAreScopedByTaxClass() throws Exception {
+		Language en = languageService.getByCode("en");
+		Country gb = countryService.getByCode("GB");
+		MerchantStore store = createStore(gb, null, TaxBasisCalculation.BILLINGADDRESS);
+		TaxClass standard = taxClass(store, TaxClass.DEFAULT_TAX_CLASS);
+		TaxClass reduced = taxClass(store, "REDUCED");
+		provinceRate(store, standard, gb, "Wales", "VAT", "20", en);
+		provinceRate(store, reduced, gb, "Wales", "VATR", "5", en);
+		provinceRate(store, standard, gb, "Scotland", "OTHER", "7", en);
+
+		Customer customer = new Customer();
+		Billing billing = new Billing();
+		billing.setCountry(gb);
+		billing.setState("Wales");
+		customer.setBilling(billing);
+
+		Map<String, BigDecimal> expected = new TreeMap<String, BigDecimal>();
+		expected.put("VAT", new BigDecimal("20.00"));
+		expected.put("VATR", new BigDecimal("3.00"));
+		assertEquals(expected, taxes(store, customer, en, line("100.00", 1, null), line("30.00", 2, reduced)));
+	}
+
 	// ---- helpers ----
 
 	private Map<String, BigDecimal> taxes(MerchantStore store, Customer customer, Language language,
@@ -193,6 +216,23 @@ public class TaxCalculationGoldenTest extends AbstractSalesManagerCoreTestCase {
 		taxRateService.create(rate);
 	}
 
+	private void provinceRate(MerchantStore store, TaxClass taxClass, Country country, String province, String code,
+			String percent, Language language) throws Exception {
+		TaxRate rate = new TaxRate();
+		rate.setCode(code);
+		rate.setTaxRate(new BigDecimal(percent));
+		rate.setTaxClass(taxClass);
+		rate.setMerchantStore(store);
+		rate.setCountry(country);
+		rate.setStateProvince(province);
+		TaxRateDescription description = new TaxRateDescription();
+		description.setName(code);
+		description.setLanguage(language);
+		description.setTaxRate(rate);
+		rate.getDescriptions().add(description);
+		taxRateService.create(rate);
+	}
+
 	private void basis(MerchantStore store, TaxBasisCalculation basis) throws Exception {
 		TaxConfiguration configuration = new TaxConfiguration();
 		configuration.setTaxBasisCalculation(basis);
@@ -200,6 +240,10 @@ public class TaxCalculationGoldenTest extends AbstractSalesManagerCoreTestCase {
 	}
 
 	private MerchantStore createStore(Zone zone, TaxBasisCalculation basis) throws Exception {
+		return createStore(countryService.getByCode("CA"), zone, basis);
+	}
+
+	private MerchantStore createStore(Country country, Zone zone, TaxBasisCalculation basis) throws Exception {
 		String code = "TAXGOLD" + STORE_SEQUENCE.incrementAndGet();
 		Language en = languageService.getByCode("en");
 		Currency currency = currencyService.getByCode("CAD");
@@ -207,7 +251,7 @@ public class TaxCalculationGoldenTest extends AbstractSalesManagerCoreTestCase {
 		languages.add(en);
 
 		MerchantStore store = new MerchantStore();
-		store.setCountry(countryService.getByCode("CA"));
+		store.setCountry(country);
 		store.setZone(zone);
 		store.setCurrency(currency);
 		store.setDefaultLanguage(en);
