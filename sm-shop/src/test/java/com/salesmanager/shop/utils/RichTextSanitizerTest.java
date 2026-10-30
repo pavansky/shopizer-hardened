@@ -44,4 +44,26 @@ class RichTextSanitizerTest {
 		assertEquals("Solid oak bench", RichTextSanitizer.sanitize("Solid oak bench"));
 		assertNull(RichTextSanitizer.sanitize(null));
 	}
+
+	@Test
+	void inlineRasterImagesFromTheEditorSurvive() {
+		String png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+		String clean = RichTextSanitizer.sanitize("<p><img src=\"" + png + "\" alt=\"dot\" width=\"10\"></p>");
+		// the sanitiser entity-encodes "=", which the browser decodes back
+		assertTrue(clean.contains("src=\"" + png.replace("=", "&#61;") + "\""), clean);
+		assertTrue(clean.contains("alt=\"dot\""), clean);
+		String relative = RichTextSanitizer.sanitize("<img src=\"/static/img/bench.jpg\">");
+		assertTrue(relative.contains("<img src=\"/static/img/bench.jpg\""), relative);
+	}
+
+	@Test
+	void svgAndNonImageDataUrlsAreRemoved() {
+		String svg = RichTextSanitizer.sanitize(
+				"<img src=\"data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+\">");
+		assertFalse(svg.contains("data:"), svg);
+		String html = RichTextSanitizer.sanitize("<img src=\"data:text/html;base64,PHNjcmlwdD4=\">");
+		assertFalse(html.contains("data:"), html);
+		String link = RichTextSanitizer.sanitize("<a href=\"data:image/png;base64,AAAA\">x</a>");
+		assertFalse(link.contains("data:"), link);
+	}
 }

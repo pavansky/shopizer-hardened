@@ -15,6 +15,7 @@ import com.salesmanager.core.model.catalog.category.Category;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.reference.language.Language;
 import com.salesmanager.shop.model.catalog.category.CategoryDescription;
+import com.salesmanager.shop.utils.RichTextSanitizer;
 import com.salesmanager.shop.model.catalog.category.PersistableCategory;
 
 @Component
@@ -156,8 +157,8 @@ public class PersistableCategoryPopulator extends
 
 	private com.salesmanager.core.model.catalog.category.CategoryDescription buildDescription(com.salesmanager.shop.model.catalog.category.CategoryDescription source, com.salesmanager.core.model.catalog.category.CategoryDescription target) throws Exception {
       //com.salesmanager.core.model.catalog.category.CategoryDescription desc = new com.salesmanager.core.model.catalog.category.CategoryDescription();
-	  target.setCategoryHighlight(source.getHighlights());
-      target.setDescription(source.getDescription());
+	  target.setCategoryHighlight(RichTextSanitizer.sanitize(source.getHighlights()));
+      target.setDescription(RichTextSanitizer.sanitize(source.getDescription()));
       target.setName(source.getName());
       target.setMetatagDescription(source.getMetaDescription());
       target.setMetatagTitle(source.getTitle());

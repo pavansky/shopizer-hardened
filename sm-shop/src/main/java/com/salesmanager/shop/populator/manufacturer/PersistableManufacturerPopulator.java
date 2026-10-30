@@ -14,6 +14,7 @@ import com.salesmanager.core.model.catalog.product.manufacturer.Manufacturer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.reference.language.Language;
 import com.salesmanager.shop.model.catalog.manufacturer.ManufacturerDescription;
+import com.salesmanager.shop.utils.RichTextSanitizer;
 import com.salesmanager.shop.model.catalog.manufacturer.PersistableManufacturer;
 
 
@@ -58,7 +59,7 @@ public class PersistableManufacturerPopulator extends AbstractDataPopulator<Pers
 					}
 					
 					desc.setManufacturer(target);
-					desc.setDescription(description.getDescription());
+					desc.setDescription(RichTextSanitizer.sanitize(description.getDescription()));
 					desc.setName(description.getName());
 					Language lang = languageService.getByCode(description.getLanguage());
 					if(lang==null) {
