@@ -3,7 +3,10 @@ package com.salesmanager.shop.store.api.v1.customer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import java.security.Principal;
+
 import javax.inject.Inject;
+import javax.inject.Named;
 import javax.servlet.http.HttpServletRequest;
 import javax.validation.Valid;
 
@@ -20,7 +23,6 @@ import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
@@ -39,6 +41,7 @@ import com.salesmanager.shop.store.api.exception.UnauthorizedException;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.controller.store.facade.StoreFacade;
 import com.salesmanager.shop.store.controller.user.facade.UserFacade;
+import com.salesmanager.shop.store.security.AbstractCustomerServices;
 import com.salesmanager.shop.store.security.AuthenticationRequest;
 import com.salesmanager.shop.store.security.AuthenticationResponse;
 import com.salesmanager.shop.store.security.JWTTokenUtil;
@@ -74,7 +77,8 @@ public class AuthenticateCustomerApi {
     private JWTTokenUtil jwtTokenUtil;
 
     @Inject
-    private UserDetailsService jwtCustomerDetailsService;
+    @Named("jwtCustomerDetailsService")
+    private AbstractCustomerServices jwtCustomerDetailsService;
     
     @Inject
     private CustomerFacade customerFacade;
@@ -138,8 +142,8 @@ public class AuthenticateCustomerApi {
             SecurityContextHolder.getContext().setAuthentication(authentication);
 
             // Reload password post-security so we can generate token
-            final JWTUser userDetails = (JWTUser)jwtCustomerDetailsService.loadUserByUsername(customer.getUserName());
-            final String token = jwtTokenUtil.generateToken(userDetails);
+            final JWTUser userDetails = (JWTUser)jwtCustomerDetailsService.loadUserByUsernameAndStore(customer.getUserName(), merchantStore.getCode());
+            final String token = jwtTokenUtil.generateCustomerToken(userDetails, merchantStore.getCode());
 
             // Return the token
             return ResponseEntity.ok(new AuthenticationResponse(customer.getId(),token));
@@ -157,9 +161,12 @@ public class AuthenticateCustomerApi {
     @RequestMapping(value = "/customer/login", method = RequestMethod.POST, produces ={ "application/json" })
     @ApiOperation(httpMethod = "POST", value = "Authenticates a customer to the application", notes = "Customer can authenticate after registration, request is {\"username\":\"admin\",\"password\":\"password\"}",response = ResponseEntity.class)
     @ResponseBody
-    public ResponseEntity<?> authenticate(@RequestBody @Valid AuthenticationRequest authenticationRequest) throws AuthenticationException {
+	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT") })
+    public ResponseEntity<?> authenticate(@RequestBody @Valid AuthenticationRequest authenticationRequest,
+    		@ApiIgnore MerchantStore merchantStore) throws AuthenticationException {
 
-    	//TODO SET STORE in flow
+        // The customer is looked up in the store of the request (store parameter,
+        // DEFAULT when absent) and the token is bound to that store.
         // Perform the security
         Authentication authentication = null;
         try {
@@ -187,9 +194,9 @@ public class AuthenticateCustomerApi {
 
         // Reload password post-security so we can generate token
         // todo create one for social
-        final JWTUser userDetails = (JWTUser)jwtCustomerDetailsService.loadUserByUsername(authenticationRequest.getUsername());
+        final JWTUser userDetails = (JWTUser)jwtCustomerDetailsService.loadUserByUsernameAndStore(authenticationRequest.getUsername(), merchantStore.getCode());
         
-        final String token = jwtTokenUtil.generateToken(userDetails);
+        final String token = jwtTokenUtil.generateCustomerToken(userDetails, merchantStore.getCode());
 
         // Return the token
         return ResponseEntity.ok(new AuthenticationResponse(userDetails.getId(),token));
@@ -198,9 +205,14 @@ public class AuthenticateCustomerApi {
     @RequestMapping(value = "/auth/customer/refresh", method = RequestMethod.GET, produces ={ "application/json" })
     public ResponseEntity<?> refreshToken(HttpServletRequest request) {
         String token = request.getHeader(tokenHeader);
+        if (token != null && token.startsWith("Bearer ")) {
+            token = token.substring(7);
+        }
 
+        // The request was authenticated with this token, so its store claim
+        // matches the request store; the refreshed token keeps the claim.
         String username = jwtTokenUtil.getUsernameFromToken(token);
-        JWTUser user = (JWTUser) jwtCustomerDetailsService.loadUserByUsername(username);
+        JWTUser user = (JWTUser) jwtCustomerDetailsService.loadUserByUsernameAndStore(username, jwtTokenUtil.getStoreFromToken(token));
 
         if (jwtTokenUtil.canTokenBeRefreshed(token, user.getLastPasswordResetDate())) {
             String refreshedToken = jwtTokenUtil.refreshToken(token);
@@ -220,6 +232,12 @@ public class AuthenticateCustomerApi {
         try {
             
             MerchantStore merchantStore = storeFacade.getByCode(request);
+
+            // Only the signed in customer's own password can be changed here.
+            Principal principal = request.getUserPrincipal();
+            if (principal == null || !principal.getName().equals(passwordRequest.getUsername())) {
+                return ResponseEntity.notFound().build();
+            }
 
             Customer customer = customerFacade.getCustomerByUserName(passwordRequest.getUsername(), merchantStore);
             

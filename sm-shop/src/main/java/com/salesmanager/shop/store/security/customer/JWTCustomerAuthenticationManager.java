@@ -1,6 +1,7 @@
 package com.salesmanager.shop.store.security.customer;
 
 import javax.inject.Inject;
+import javax.inject.Named;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -11,10 +12,10 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 
+import com.salesmanager.shop.store.security.AbstractCustomerServices;
 import com.salesmanager.shop.store.security.JWTTokenUtil;
 import com.salesmanager.shop.store.security.common.CustomAuthenticationException;
 import com.salesmanager.shop.store.security.common.CustomAuthenticationManager;
@@ -30,7 +31,8 @@ public class JWTCustomerAuthenticationManager extends CustomAuthenticationManage
     private JWTTokenUtil jwtTokenUtil;
     
     @Inject
-    private UserDetailsService jwtCustomerDetailsService;
+    @Named("jwtCustomerDetailsService")
+    private AbstractCustomerServices jwtCustomerDetailsService;
 
 	@Override
 	public Authentication attemptAuthentication(HttpServletRequest request, HttpServletResponse response)
@@ -38,11 +40,13 @@ public class JWTCustomerAuthenticationManager extends CustomAuthenticationManage
 		
 		final String requestHeader = request.getHeader(super.getTokenHeader());//token
         String username = null;
+        String tokenStore = null;
         String authToken = null;
         if (requestHeader != null && requestHeader.startsWith("Bearer ")) {//Bearer
             authToken = requestHeader.substring(7);
             try {
                 username = jwtTokenUtil.getUsernameFromToken(authToken);
+                tokenStore = jwtTokenUtil.getStoreFromToken(authToken);
             } catch (IllegalArgumentException e) {
             	logger.error("an error occured during getting username from token", e);
             } catch (ExpiredJwtException e) {
@@ -56,11 +60,18 @@ public class JWTCustomerAuthenticationManager extends CustomAuthenticationManage
 		
         
         logger.info("checking authentication for user " + username);
+
+        // A customer token is bound to the store it was issued for. A token without
+        // a store, or presented to another store, does not authenticate the request.
+        String requestStore = AbstractCustomerServices.requestStoreCode(request);
+        if (username != null && (tokenStore == null || !tokenStore.equals(requestStore))) {
+            logger.warn("customer token for store " + tokenStore + " used against store " + requestStore);
+            return null;
+        }
+
         if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
 
-            // It is not compelling necessary to load the use details from the database. You could also store the information
-            // in the token and read it from it. It's up to you ;)
-            UserDetails userDetails = this.jwtCustomerDetailsService.loadUserByUsername(username);
+            UserDetails userDetails = this.jwtCustomerDetailsService.loadUserByUsernameAndStore(username, tokenStore);
 
             // For simple validation it is completely sufficient to just check the token integrity. You don't have to call
             // the database compellingly. Again it's up to you ;)
