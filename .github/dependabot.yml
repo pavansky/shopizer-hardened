@@ -24,3 +24,13 @@ updates:
     schedule: { interval: weekly, day: monday }
     groups:
       actions: { patterns: ["*"] }
+
+  # pinned images of the compose stack (MySQL, Prometheus, Alertmanager, Grafana, Mailpit)
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule: { interval: weekly, day: monday }
+    groups:
+      compose-images: { update-types: [minor, patch] }
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
