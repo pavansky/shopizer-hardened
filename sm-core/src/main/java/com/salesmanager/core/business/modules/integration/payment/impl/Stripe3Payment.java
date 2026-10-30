@@ -33,6 +33,7 @@ import com.stripe.exception.ApiConnectionException;
 import com.stripe.exception.ApiException;
 import com.stripe.exception.AuthenticationException;
 import com.stripe.exception.CardException;
+import com.stripe.exception.IdempotencyException;
 import com.stripe.exception.InvalidRequestException;
 import com.stripe.exception.StripeException;
 import com.stripe.model.PaymentIntent;
@@ -191,7 +192,9 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 			RequestOptions requestOptions = requestOptions(apiKey);
 			
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(token, requestOptions);
+			PaymentIntent paymentIntent = retrievePaymentIntent(token, requestOptions);
+
+			checkConfirmedByCustomer(paymentIntent);
 			
 			transaction.setAmount(amount);
 			//transaction.setOrder(order);
@@ -332,8 +335,9 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			// or replayed capture never takes the money twice.
 			RequestOptions captureOptions = requestOptions(apiKey, attemptRef(payment));
 
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(token, requestOptions);
+			PaymentIntent paymentIntent = retrievePaymentIntent(token, requestOptions);
 
+			checkConfirmedByCustomer(paymentIntent);
 			checkCapturable(paymentIntent, minorAmount);
 
 			PaymentIntentCaptureParams params =
@@ -342,7 +346,7 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 							.setStatementDescriptorSuffix(statementSuffix(store.getStorename()))
 					.build();
 
-			paymentIntent = paymentIntent.capture(params, captureOptions);
+			paymentIntent = capturePaymentIntent(paymentIntent, params, captureOptions);
 			
 			
 			transaction.setAmount(amount);
@@ -356,8 +360,6 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			transaction.getTransactionDetails().put("MESSAGETEXT", null);
 			
 		} catch (Exception e) {
-
-			e.printStackTrace();
 
 			throw buildException(e);
 	
@@ -428,6 +430,18 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 	}
 	
 	/**
+	 * A PaymentIntent the customer has not finished (3-D Secure challenge pending, card
+	 * refused at confirmation, or never confirmed) is "not paid yet", not a decline: the
+	 * customer can still complete it in the browser with the client secret.
+	 */
+	static void checkConfirmedByCustomer(PaymentIntent paymentIntent) throws PaymentActionRequiredException {
+		if (PaymentActionRequiredException.isCustomerActionStatus(paymentIntent.getStatus())) {
+			throw new PaymentActionRequiredException(paymentIntent.getId(), paymentIntent.getClientSecret(),
+					paymentIntent.getStatus());
+		}
+	}
+
+	/**
 	 * Fails with a precise message when the PaymentIntent cannot be captured for the requested amount.
 	 */
 	private void checkCapturable(PaymentIntent paymentIntent, long minorAmount) throws IntegrationException {
@@ -446,7 +460,9 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 	private IntegrationException buildException(Exception ex) {
 
-	if(ex instanceof ApiConnectionException || ex instanceof ApiException) {
+	if(ex instanceof ApiConnectionException || ex instanceof ApiException || ex instanceof IdempotencyException) {
+		// IdempotencyException: a request with the same key is still running at Stripe, so
+		// this one cannot tell what happened either.
 		// Network failure or Stripe server error: the request may have been applied.
 		LOGGER.error("Stripe outcome unknown", ex);
 		return new PaymentOutcomeUnknownException("Stripe did not answer clearly: " + ex.getMessage(), ex);
@@ -693,6 +709,12 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 	/** Retrieves a PaymentIntent. Protected so tests can stub the network call. */
 	protected PaymentIntent retrievePaymentIntent(String id, RequestOptions requestOptions) throws StripeException {
 		return PaymentIntent.retrieve(id, requestOptions);
+	}
+
+	/** Captures a PaymentIntent. Protected so tests can stub the network call. */
+	protected PaymentIntent capturePaymentIntent(PaymentIntent intent, PaymentIntentCaptureParams params,
+			RequestOptions requestOptions) throws StripeException {
+		return intent.capture(params, requestOptions);
 	}
 
 	/** Cancels a PaymentIntent. Protected so tests can stub the network call. */

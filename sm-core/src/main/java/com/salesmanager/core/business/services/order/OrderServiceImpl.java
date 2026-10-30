@@ -36,6 +36,8 @@ import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.business.services.order.ordertotal.OrderTotalService;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.TransactionService;
+import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
 import com.salesmanager.core.business.services.shipping.ShippingService;
 import com.salesmanager.core.business.services.shoppingcart.ShoppingCartService;
 import com.salesmanager.core.business.services.tax.TaxService;
@@ -60,6 +62,7 @@ import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.order.orderstatus.OrderStatusHistory;
 import com.salesmanager.core.model.payments.Payment;
 import com.salesmanager.core.model.payments.PaymentAttempt;
+import com.salesmanager.core.model.payments.PaymentAttemptStatus;
 import com.salesmanager.core.modules.integration.PaymentOutcomeUnknownException;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.payments.TransactionType;
@@ -103,6 +106,9 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
 
     @Inject
     private OrderCheckoutSteps orderCheckoutSteps;
+
+    @Inject
+    private PaymentAttemptService paymentAttemptService;
 
     private final OrderRepository orderRepository;
 
@@ -155,19 +161,28 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	if (finalStatus == null || finalStatus == OrderStatus.PAYMENT_PENDING) {
     		finalStatus = OrderStatus.ORDERED;
     	}
-    	order = orderCheckoutSteps.createPendingOrder(order, customer, items, transaction);
+    	// A checkout retried after a 3-D Secure challenge carries the same PaymentIntent:
+    	// continue the order kept open for it instead of reserving the stock again.
+    	PaymentAttempt attempt = attemptAwaitingCustomerAction(order, payment, store);
+    	if (attempt != null) {
+    		order = orderRepository.findById(attempt.getOrderId()).orElseThrow(
+    				() -> new ServiceException(ServiceException.EXCEPTION_ERROR, "Order of the resumed payment not found"));
+    		LOGGER.info("Order {} resumes payment attempt {} after customer action", order.getId(),
+    				attempt.getAttemptRef());
+    	} else {
+    		order = orderCheckoutSteps.createPendingOrder(order, customer, items, transaction);
 
-    	// 2. committed step: write-ahead record of the gateway call. Its reference goes to
-    	//    the gateway, so a charge whose Transaction is never stored can still be found.
-    	PaymentAttempt attempt;
-    	try {
-    		attempt = orderCheckoutSteps.beginPaymentAttempt(newAttempt(order, payment, store));
-    	} catch (RuntimeException e) {
-    		// Nothing was sent to the gateway: fail the order now rather than waiting for the reconciler.
-    		LOGGER.error("Could not record the payment attempt of order " + order.getId() + "; not charging", e);
-    		orderCheckoutSteps.markPaymentFailed(order.getId(), items, "payment attempt not recorded", null);
-    		order.setStatus(OrderStatus.PAYMENT_FAILED);
-    		throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Payment could not be started");
+    		// 2. committed step: write-ahead record of the gateway call. Its reference goes to
+    		//    the gateway, so a charge whose Transaction is never stored can still be found.
+    		try {
+    			attempt = orderCheckoutSteps.beginPaymentAttempt(newAttempt(order, payment, store));
+    		} catch (RuntimeException e) {
+    			// Nothing was sent to the gateway: fail the order now rather than waiting for the reconciler.
+    			LOGGER.error("Could not record the payment attempt of order " + order.getId() + "; not charging", e);
+    			orderCheckoutSteps.markPaymentFailed(order.getId(), items, "payment attempt not recorded", null);
+    			order.setStatus(OrderStatus.PAYMENT_FAILED);
+    			throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Payment could not be started");
+    		}
     	}
     	if (payment.getPaymentMetaData() == null) {
     		payment.setPaymentMetaData(new HashMap<>());
@@ -179,6 +194,16 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	try {
     		processTransaction = paymentService.processPayment(customer, store, payment, items, order);
     	} catch (Exception e) {
+    		PaymentActionRequiredException actionRequired = PaymentActionRequiredException.in(e);
+    		if (actionRequired != null && keepOpenForCustomerAction(attempt, actionRequired)) {
+    			// Not paid yet: the customer finishes 3-D Secure (or picks another card) in the
+    			// browser. The order stays PAYMENT_PENDING with its stock and the attempt stays
+    			// open; the retried checkout continues it. No money moved.
+    			LOGGER.info("Order {} waits for customer action on PaymentIntent {} ({})", order.getId(),
+    					actionRequired.getPaymentIntentId(), actionRequired.getStatus());
+    			actionRequired.setOrderId(order.getId());
+    			throw actionRequired;
+    		}
     		if (isOutcomeUnknown(e)) {
     			// Money may have been taken. Keep the order PAYMENT_PENDING and its stock
     			// reserved; the reconciler asks the gateway and settles it.
@@ -217,6 +242,57 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	order.setStatus(finalStatus);
 
     	return order;
+    }
+
+    /** Failure reason of an attempt kept open while the customer completes the payment in the browser. */
+    static final String AWAITING_CUSTOMER_ACTION = "awaiting customer action: ";
+
+    /**
+     * Marks the attempt as waiting for the customer. It stays INITIATED, so the
+     * reconciler still asks Stripe about it (an abandoned requires_payment_method
+     * intent fails the order after the grace period, an abandoned challenge moves it
+     * to PAYMENT_REVIEW after a day). Returns false when the mark could not be
+     * written; the order is then failed as before, so no second open order can
+     * later use the same PaymentIntent.
+     */
+    private boolean keepOpenForCustomerAction(PaymentAttempt attempt, PaymentActionRequiredException actionRequired) {
+    	try {
+    		return paymentAttemptService.update(attempt.getId(), PaymentAttemptStatus.INITIATED,
+    				actionRequired.getPaymentIntentId(), AWAITING_CUSTOMER_ACTION + actionRequired.getStatus());
+    	} catch (RuntimeException e) {
+    		LOGGER.error("Could not keep payment attempt " + attempt.getAttemptRef() + " open for customer action", e);
+    		return false;
+    	}
+    }
+
+    /**
+     * The open attempt of an earlier checkout that is waiting for the customer to act on
+     * the same PaymentIntent, or null. It is resumed only while its order is still
+     * PAYMENT_PENDING in this store for the same amount. Otherwise that order is failed
+     * (its stock returned) before a new one is placed, so at most one open order ever
+     * uses a PaymentIntent and the reconciler cannot confirm two orders for one payment.
+     */
+    private PaymentAttempt attemptAwaitingCustomerAction(Order order, Payment payment, MerchantStore store) {
+    	String intentId = knownGatewayRef(payment);
+    	if (intentId == null) {
+    		return null;
+    	}
+    	PaymentAttempt previous = paymentAttemptService.findByGatewayRef(intentId);
+    	if (previous == null || previous.getStatus() != PaymentAttemptStatus.INITIATED
+    			|| !StringUtils.startsWith(previous.getFailureReason(), AWAITING_CUSTOMER_ACTION)
+    			|| !store.getId().equals(previous.getMerchantId())) {
+    		return null;
+    	}
+    	Order waiting = orderRepository.findById(previous.getOrderId()).orElse(null);
+    	if (waiting != null && waiting.getStatus() == OrderStatus.PAYMENT_PENDING && waiting.getTotal() != null
+    			&& order.getTotal() != null && waiting.getTotal().compareTo(order.getTotal()) == 0) {
+    		return previous;
+    	}
+    	LOGGER.info("Order {} waiting on PaymentIntent {} is superseded by a new checkout", previous.getOrderId(),
+    			intentId);
+    	orderCheckoutSteps.reconcileUnpaidOrder(previous.getOrderId(), "superseded by a new checkout",
+    			previous.getId());
+    	return null;
     }
 
     private static PaymentAttempt newAttempt(Order order, Payment payment, MerchantStore store) {
