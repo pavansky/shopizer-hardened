@@ -21,6 +21,7 @@ public class ReadableOrderLifecycle implements Serializable {
 	private List<String> statusUpdates = new ArrayList<>();
 	private boolean cancelable;
 	private boolean paymentRecheck;
+	private boolean paymentConfirm;
 	private BigDecimal refundable = BigDecimal.ZERO;
 	private String currency;
 	private String message;
@@ -99,5 +100,14 @@ public class ReadableOrderLifecycle implements Serializable {
 
 	public void setMessage(String message) {
 		this.message = message;
+	}
+
+	/** True for PAYMENT_REVIEW: a person may confirm the payment by hand (POST /payment/confirm). */
+	public boolean isPaymentConfirm() {
+		return paymentConfirm;
+	}
+
+	public void setPaymentConfirm(boolean paymentConfirm) {
+		this.paymentConfirm = paymentConfirm;
 	}
 }

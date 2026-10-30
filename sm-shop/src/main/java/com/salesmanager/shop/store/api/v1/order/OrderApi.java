@@ -605,6 +605,51 @@ public class OrderApi {
 		return orderFacade.recheckPayment(id, merchantStore);
 	}
 
+	/**
+	 * A person confirms the payment of a PAYMENT_REVIEW order that the gateway
+	 * cannot report (a money order that arrived, a charge seen in the gateway
+	 * dashboard). Body {"reason": "...", "reference": "..."}; the reason is
+	 * required and the history records it with the admin user. Records the
+	 * payment, settles the order and sends the order confirmation. 409 for an
+	 * order in any other status.
+	 */
+	@RequestMapping(value = { "/private/orders/{id}/payment/confirm" }, method = RequestMethod.POST)
+	@ResponseStatus(HttpStatus.OK)
+	@ResponseBody
+	@ApiImplicitParams({
+			@ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT"),
+			@ApiImplicitParam(name = "lang", dataType = "string", defaultValue = "en") })
+	public ReadableOrderLifecycle confirmPayment(@PathVariable final Long id,
+			@RequestBody(required = false) ConfirmPaymentRequest confirm, @ApiIgnore MerchantStore merchantStore,
+			@ApiIgnore Language language) {
+		authorizeMoneyMovement(merchantStore);
+		String user = authorizationUtils.authenticatedUser();
+		return orderFacade.confirmPayment(id, user, confirm == null ? null : confirm.getReference(),
+				confirm == null ? null : confirm.getReason(), merchantStore);
+	}
+
+	/** Body of a payment confirmed by hand. */
+	public static class ConfirmPaymentRequest {
+		private String reason;
+		private String reference;
+
+		public String getReason() {
+			return reason;
+		}
+
+		public void setReason(String reason) {
+			this.reason = reason;
+		}
+
+		public String getReference() {
+			return reference;
+		}
+
+		public void setReference(String reference) {
+			this.reference = reference;
+		}
+	}
+
 	/** Optional cancel request body. */
 	public static class CancelRequest {
 		private String comment;

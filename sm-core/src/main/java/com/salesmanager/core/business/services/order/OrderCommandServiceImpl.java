@@ -1,6 +1,7 @@
 package com.salesmanager.core.business.services.order;
 
 import java.math.BigDecimal;
+import java.util.Date;
 
 import javax.inject.Inject;
 
@@ -8,10 +9,12 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.order.reconciliation.PaymentGateways;
+import com.salesmanager.core.business.services.order.reconciliation.PendingOrderPaidEvent;
 import com.salesmanager.core.business.services.order.reconciliation.PendingOrderQueries;
 import com.salesmanager.core.business.services.order.reconciliation.ReconciliationMetrics;
 import com.salesmanager.core.business.services.payments.PaymentService;
@@ -23,6 +26,7 @@ import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.PaymentAttemptStatus;
 import com.salesmanager.core.model.payments.Transaction;
+import com.salesmanager.core.model.payments.TransactionType;
 import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
 import com.salesmanager.core.modules.integration.payment.model.PaymentCompensation;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
@@ -57,6 +61,10 @@ public class OrderCommandServiceImpl implements OrderCommandService {
 
 	@Inject
 	private OrderCheckoutSteps steps;
+
+	/** Sends the order confirmation once a payment is confirmed by hand. */
+	@Inject
+	private ApplicationEventPublisher events;
 
 	@Inject
 	private ObjectProvider<ReconciliationMetrics> metrics;
@@ -203,6 +211,50 @@ public class OrderCommandServiceImpl implements OrderCommandService {
 		}
 		return status.getOutcome() == GatewayPaymentStatus.Outcome.NOT_FOUND
 				|| StringUtils.isNotBlank(status.getGatewayTransactionId());
+	}
+
+	@Override
+	public String confirmPayment(Order order, String confirmedBy, String reference, String reason)
+			throws ServiceException {
+		Long orderId = order.getId();
+		if (StringUtils.isBlank(reason)) {
+			throw new IllegalArgumentException("A reason is required to confirm a payment by hand");
+		}
+		if (order.getStatus() != OrderStatus.PAYMENT_REVIEW) {
+			throw new OrderCommandRefusedException("Order " + orderId + " is " + order.getStatus()
+					+ "; only PAYMENT_REVIEW orders can have their payment confirmed by hand"
+					+ (order.getStatus() == OrderStatus.PAYMENT_PENDING ? ". Re-check the payment instead" : ""));
+		}
+		if (queries.hasSuccessfulPayment(orderId) || attempts.hasSucceeded(orderId)) {
+			throw new OrderCommandRefusedException("Order " + orderId
+					+ " already has a recorded payment; re-check the payment to settle it");
+		}
+		PaymentAttempt attempt = attempts.latestForOrder(orderId);
+		String note = "payment confirmed by hand by " + StringUtils.defaultIfBlank(confirmedBy, "unknown user")
+				+ (StringUtils.isBlank(reference) ? "" : ", reference " + reference.trim()) + ": " + reason.trim();
+		Transaction payment = new Transaction();
+		payment.setAmount(order.getTotal());
+		payment.setTransactionDate(new Date());
+		payment.setTransactionType(TransactionType.AUTHORIZECAPTURE);
+		payment.setPaymentType(order.getPaymentType());
+		String id = StringUtils.isNotBlank(reference) ? reference.trim() : "MANUAL-" + orderId;
+		payment.getTransactionDetails().put("TRANSACTIONID", id);
+		payment.getTransactionDetails().put("TRNORDERNUMBER", id);
+		payment.getTransactionDetails().put("TRNAPPROVED", "MANUAL_CONFIRMATION");
+		payment.getTransactionDetails().put("MESSAGETEXT", StringUtils.abbreviate(note, 250));
+		if (attempt != null) {
+			payment.getTransactionDetails().put("ATTEMPTREF", attempt.getAttemptRef());
+		}
+		if (!steps.reconcileConfirmedPayment(orderId, attempt == null ? null : attempt.getId(), payment, note, true)) {
+			throw new OrderCommandRefusedException("Order " + orderId + " changed while its payment was being confirmed");
+		}
+		LOGGER.warn("Order {}: {}", orderId, note);
+		try {
+			events.publishEvent(new PendingOrderPaidEvent(orderId));
+		} catch (RuntimeException e) {
+			LOGGER.error("Order " + orderId + " confirmed by hand but its confirmation email could not be queued", e);
+		}
+		return note;
 	}
 
 	/**

@@ -1710,6 +1710,26 @@ public class OrderFacadeImpl implements OrderFacade {
 		return lifecycle(after, message);
 	}
 
+	@Override
+	public ReadableOrderLifecycle confirmPayment(Long orderId, String confirmedBy, String reference, String reason,
+			MerchantStore store) {
+		Validate.notNull(store, "MerchantStore must not be null");
+		if (StringUtils.isBlank(reason)) {
+			throw new RestApiException("400", "A reason is required to confirm a payment by hand");
+		}
+		Order order = storeOrder(orderId, store);
+		String done;
+		try {
+			done = orderCommandService.confirmPayment(order, confirmedBy, reference, reason);
+		} catch (OrderCommandRefusedException | IllegalOrderStatusTransitionException e) {
+			throw new ConflictException(e.getMessage());
+		} catch (ServiceException e) {
+			throw new ServiceRuntimeException("Payment of order [" + orderId + "] not confirmed", e);
+		}
+		Order after = storeOrder(orderId, store);
+		return lifecycle(after, "Payment confirmed; order is now " + after.getStatus() + " (" + done + ")");
+	}
+
 	private ReadableOrderLifecycle lifecycle(Order order, String message) {
 		ReadableOrderLifecycle readable = new ReadableOrderLifecycle();
 		OrderStatus status = order.getStatus();
@@ -1719,6 +1739,7 @@ public class OrderFacadeImpl implements OrderFacade {
 		readable.setStatusUpdates(names(OrderCommandService.statusUpdatesFrom(status)));
 		readable.setCancelable(OrderStatusTransitions.allowedFrom(status).contains(OrderStatus.CANCELED));
 		readable.setPaymentRecheck(status == OrderStatus.PAYMENT_PENDING || status == OrderStatus.PAYMENT_REVIEW);
+		readable.setPaymentConfirm(status == OrderStatus.PAYMENT_REVIEW);
 		try {
 			readable.setRefundable(transactionService.getRefundableAmount(order));
 		} catch (ServiceException e) {

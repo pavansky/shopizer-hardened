@@ -74,4 +74,24 @@ public interface OrderCommandService {
 	 *         nothing was cancelled
 	 */
 	String cancel(Order order, MerchantStore store, String comment) throws ServiceException;
+
+	/**
+	 * A person confirms a payment the gateway cannot report, for example a money
+	 * order that arrived or a charge seen in the gateway dashboard that the shop
+	 * cannot look up. Only for PAYMENT_REVIEW orders: a PAYMENT_PENDING order is
+	 * still being settled by the reconciler and is re-checked instead.
+	 *
+	 * Records a captured payment for the order total, closes the payment
+	 * attempt as succeeded, moves the order to ORDERED (money order) or
+	 * PROCESSED with a history entry naming the person, the reason and the
+	 * reference, and publishes the event that sends the order confirmation.
+	 *
+	 * @param confirmedBy the admin user who confirmed the payment
+	 * @param reference the gateway or bank reference of the payment, may be blank
+	 * @param reason why the payment is known to be received, required
+	 * @return the history text
+	 * @throws OrderCommandRefusedException the order is not in PAYMENT_REVIEW,
+	 *         already has a recorded payment, or changed meanwhile
+	 */
+	String confirmPayment(Order order, String confirmedBy, String reference, String reason) throws ServiceException;
 }

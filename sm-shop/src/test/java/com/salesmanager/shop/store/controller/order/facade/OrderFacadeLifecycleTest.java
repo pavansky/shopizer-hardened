@@ -151,6 +151,33 @@ class OrderFacadeLifecycleTest {
 	}
 
 	@Test
+	void manualPaymentConfirmationGoesThroughTheCommandWithTheAdminUser() throws Exception {
+		order.setStatus(OrderStatus.PAYMENT_REVIEW);
+		when(commands.confirmPayment(order, "admin@shopizer.com", "MO-1", "money order received"))
+				.thenAnswer(inv -> {
+					order.setStatus(OrderStatus.ORDERED);
+					return "payment confirmed by hand";
+				});
+
+		ReadableOrderLifecycle l = facade.confirmPayment(9L, "admin@shopizer.com", "MO-1", "money order received",
+				store);
+
+		assertEquals("ORDERED", l.getStatus());
+		assertTrue(l.getMessage().startsWith("Payment confirmed"), l.getMessage());
+	}
+
+	@Test
+	void manualPaymentConfirmationNeedsAReasonAndAReviewOrder() throws Exception {
+		assertThrows(com.salesmanager.shop.store.api.exception.RestApiException.class,
+				() -> facade.confirmPayment(9L, "admin@shopizer.com", null, " ", store));
+		verify(commands, never()).confirmPayment(any(), any(), any(), any());
+
+		when(commands.confirmPayment(eq(order), any(), any(), any()))
+				.thenThrow(new OrderCommandRefusedException("only PAYMENT_REVIEW"));
+		assertThrows(ConflictException.class, () -> facade.confirmPayment(9L, "admin@shopizer.com", null, "x", store));
+	}
+
+	@Test
 	void historyNoteCannotChangeTheStatus() throws Exception {
 		PersistableOrderStatusHistory note = new PersistableOrderStatusHistory();
 		note.setStatus(OrderStatus.DELIVERED);
@@ -256,6 +283,7 @@ class OrderFacadeLifecycleTest {
 
 		assertTrue(l.getStatusUpdates().isEmpty());
 		assertTrue(l.isPaymentRecheck());
+		assertTrue(l.isPaymentConfirm());
 		assertTrue(l.isCancelable());
 	}
 

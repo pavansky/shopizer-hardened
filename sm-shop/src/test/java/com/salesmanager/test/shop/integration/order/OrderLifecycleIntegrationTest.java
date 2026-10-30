@@ -255,6 +255,40 @@ public class OrderLifecycleIntegrationTest extends ServicesTestSupport {
 		assertEquals(5, stock("lifecycle-review"));
 	}
 
+	@SuppressWarnings("unchecked")
+	@Test
+	public void reviewOrderPaymentConfirmedByHandIsSettledAndRefundable() throws Exception {
+		long id = setUpOrder("lifecycle-confirm");
+		String base = "/api/v1/private/orders/" + id;
+		call(HttpMethod.POST, base + "/payment/confirm", "{\"reason\":\"received\"}", HttpStatus.CONFLICT);
+		jdbc.update("update SALESMANAGER.ORDERS set ORDER_STATUS = 'PAYMENT_REVIEW' where ORDER_ID = ?", id);
+		jdbc.update("delete from SALESMANAGER.SM_TRANSACTION where ORDER_ID = ?", id);
+		jdbc.update("update SALESMANAGER.PAYMENT_ATTEMPT set STATUS = 'UNKNOWN' where ORDER_ID = ?", id);
+		assertEquals(Boolean.TRUE, call(HttpMethod.GET, base + "/transitions", null, HttpStatus.OK).get("paymentConfirm"));
+
+		// a reason is required
+		call(HttpMethod.POST, base + "/payment/confirm", "{\"reference\":\"MO-77\"}", HttpStatus.BAD_REQUEST);
+		assertEquals("PAYMENT_REVIEW", status(id));
+
+		Map<String, Object> confirmed = call(HttpMethod.POST, base + "/payment/confirm",
+				"{\"reason\":\"money order cashed\",\"reference\":\"MO-77\"}", HttpStatus.OK);
+		assertEquals("ORDERED", confirmed.get("status"));
+		assertEquals(Boolean.FALSE, confirmed.get("paymentConfirm"));
+		assertEquals(4, stock("lifecycle-confirm"));
+		assertEquals("SUCCEEDED", jdbc.queryForObject("select STATUS from SALESMANAGER.PAYMENT_ATTEMPT where ORDER_ID = ?"
+				+ " order by ID desc limit 1", String.class, id));
+		String history = String.join("|", jdbc.queryForList(
+				"select COMMENTS from SALESMANAGER.ORDER_STATUS_HISTORY where ORDER_ID = ?", String.class, id));
+		assertTrue(history.contains("money order cashed") && history.contains("MO-77"), history);
+		// a second confirmation is refused, and the recorded payment can be refunded as usual
+		call(HttpMethod.POST, base + "/payment/confirm", "{\"reason\":\"again\"}", HttpStatus.CONFLICT);
+		assertEquals(Arrays.asList("PROCESSED", "DELIVERED"),
+				(List<String>) call(HttpMethod.GET, base + "/transitions", null, HttpStatus.OK).get("statusUpdates"));
+		call(HttpMethod.POST, base + "/refund", "{}", HttpStatus.OK);
+		assertEquals("REFUNDED", status(id));
+		assertEquals(5, stock("lifecycle-confirm"));
+	}
+
 	@Test
 	public void unknownOrderIsNotFound() throws Exception {
 		admin = getHeader();

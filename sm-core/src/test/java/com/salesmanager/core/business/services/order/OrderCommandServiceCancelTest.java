@@ -23,11 +23,14 @@ import java.math.BigDecimal;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.context.ApplicationEventPublisher;
 
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.order.reconciliation.PaymentGateways;
+import com.salesmanager.core.business.services.order.reconciliation.PendingOrderPaidEvent;
 import com.salesmanager.core.business.services.order.reconciliation.PendingOrderQueries;
 import com.salesmanager.core.business.services.order.reconciliation.ReconciliationMetrics;
 import com.salesmanager.core.business.services.payments.PaymentService;
@@ -38,7 +41,9 @@ import com.salesmanager.core.model.order.Order;
 import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.PaymentAttemptStatus;
+import com.salesmanager.core.model.payments.PaymentType;
 import com.salesmanager.core.model.payments.Transaction;
+import com.salesmanager.core.model.payments.TransactionType;
 import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
 import com.salesmanager.core.modules.integration.payment.model.PaymentCompensation;
 import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
@@ -53,6 +58,7 @@ class OrderCommandServiceCancelTest {
 	private PaymentGateways gateways;
 	private PendingOrderQueries queries;
 	private OrderCheckoutSteps steps;
+	private ApplicationEventPublisher events;
 	private ObjectProvider<ReconciliationMetrics> metrics;
 	private final MerchantStore store = new MerchantStore();
 	private final Order order = new Order();
@@ -72,6 +78,8 @@ class OrderCommandServiceCancelTest {
 		inject("gateways", gateways);
 		inject("queries", queries);
 		inject("steps", steps);
+		events = mock(ApplicationEventPublisher.class);
+		inject("events", events);
 		@SuppressWarnings("unchecked")
 		ObjectProvider<ReconciliationMetrics> provider = mock(ObjectProvider.class);
 		metrics = provider;
@@ -258,6 +266,64 @@ class OrderCommandServiceCancelTest {
 
 		ServiceException e = assertThrows(ServiceException.class, () -> service.cancel(order, store, null));
 		assertEquals("gateway down", e.getMessage());
+	}
+
+	@Test
+	void manualConfirmationRecordsTheTotalSettlesTheReviewOrderAndSendsTheConfirmation() throws Exception {
+		order.setStatus(OrderStatus.PAYMENT_REVIEW);
+		order.setTotal(new BigDecimal("249.00"));
+		order.setPaymentType(PaymentType.MONEYORDER);
+		PaymentAttempt a = attempt(PaymentAttemptStatus.UNKNOWN);
+		when(attempts.latestForOrder(9L)).thenReturn(a);
+		when(steps.reconcileConfirmedPayment(eq(9L), eq(90L), any(Transaction.class), anyString(), eq(true)))
+				.thenReturn(true);
+
+		String done = service.confirmPayment(order, "admin@shopizer.com", "MO-123", "money order received");
+
+		ArgumentCaptor<Transaction> payment = ArgumentCaptor.forClass(Transaction.class);
+		ArgumentCaptor<String> comment = ArgumentCaptor.forClass(String.class);
+		verify(steps).reconcileConfirmedPayment(eq(9L), eq(90L), payment.capture(), comment.capture(), eq(true));
+		assertEquals(new BigDecimal("249.00"), payment.getValue().getAmount());
+		assertEquals(TransactionType.AUTHORIZECAPTURE, payment.getValue().getTransactionType());
+		assertEquals(PaymentType.MONEYORDER, payment.getValue().getPaymentType());
+		assertEquals("MO-123", payment.getValue().getTransactionDetails().get("TRANSACTIONID"));
+		assertTrue(comment.getValue().contains("admin@shopizer.com"), comment.getValue());
+		assertTrue(comment.getValue().contains("MO-123"), comment.getValue());
+		assertTrue(comment.getValue().contains("money order received"), comment.getValue());
+		assertEquals(comment.getValue(), done);
+		ArgumentCaptor<Object> event = ArgumentCaptor.forClass(Object.class);
+		verify(events).publishEvent(event.capture());
+		assertEquals(9L, ((PendingOrderPaidEvent) event.getValue()).getOrderId());
+	}
+
+	@Test
+	void manualConfirmationIsOnlyForReviewOrders() throws Exception {
+		for (OrderStatus s : new OrderStatus[] { OrderStatus.PAYMENT_PENDING, OrderStatus.ORDERED,
+				OrderStatus.CANCELED }) {
+			order.setStatus(s);
+			assertThrows(OrderCommandRefusedException.class,
+					() -> service.confirmPayment(order, "admin@shopizer.com", null, "received"));
+		}
+		order.setStatus(OrderStatus.PAYMENT_REVIEW);
+		assertThrows(IllegalArgumentException.class,
+				() -> service.confirmPayment(order, "admin@shopizer.com", null, " "));
+		when(attempts.hasSucceeded(9L)).thenReturn(true);
+		assertThrows(OrderCommandRefusedException.class,
+				() -> service.confirmPayment(order, "admin@shopizer.com", null, "received"));
+		verifyNoInteractions(events);
+		verify(steps, never()).reconcileConfirmedPayment(anyLong(), any(), any(), anyString(), anyBoolean());
+	}
+
+	@Test
+	void manualConfirmationThatLostARaceSendsNothing() throws Exception {
+		order.setStatus(OrderStatus.PAYMENT_REVIEW);
+		order.setTotal(new BigDecimal("10.00"));
+		when(steps.reconcileConfirmedPayment(eq(9L), isNull(), any(Transaction.class), anyString(), eq(true)))
+				.thenReturn(false);
+
+		assertThrows(OrderCommandRefusedException.class,
+				() -> service.confirmPayment(order, "admin@shopizer.com", null, "received"));
+		verifyNoInteractions(events);
 	}
 
 	@Test

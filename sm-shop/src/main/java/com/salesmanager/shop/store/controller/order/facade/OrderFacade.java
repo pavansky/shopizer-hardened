@@ -212,6 +212,16 @@ public interface OrderFacade {
 	com.salesmanager.shop.model.order.ReadableOrderLifecycle recheckPayment(Long orderId, MerchantStore store);
 
 	/**
+	 * A person confirms the payment of a PAYMENT_REVIEW order of the given store
+	 * that the gateway cannot report (see OrderCommandService.confirmPayment).
+	 * @throws com.salesmanager.shop.store.api.exception.ResourceNotFoundException order not in store
+	 * @throws com.salesmanager.shop.store.api.exception.ConflictException order not in PAYMENT_REVIEW
+	 * @throws com.salesmanager.shop.store.api.exception.RestApiException 400 when the reason is blank
+	 */
+	com.salesmanager.shop.model.order.ReadableOrderLifecycle confirmPayment(Long orderId, String confirmedBy,
+			String reference, String reason, MerchantStore store);
+
+	/**
 	 * Returns next TransactionType expected if any.
 	 */
 	TransactionType nextTransaction(Long orderId, MerchantStore store);
