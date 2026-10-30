@@ -56,8 +56,10 @@ token = None
 
 
 def call(method, path, body=None, raw=None, content_type="application/json", auth=True, ok=(200, 201)):
-    # writes occasionally fail with a 5xx under concurrency (the image store and the id
-    # generator), so a 5xx is retried twice before the product is reported as failed
+    # writes occasionally fail with a 5xx or time out under concurrency (the image store,
+    # and the async product index listener sharing the request's session), so a 5xx or a
+    # timeout is retried twice before the product is reported as failed. A retried write
+    # may already have been applied; seed_product accepts the duplicate in that case.
     for attempt in range(3):
         status, result = call_once(method, path, body, raw, content_type, auth, ok)
         if status < 500:
@@ -82,9 +84,14 @@ def call_once(method, path, body, raw, content_type, auth, ok):
         if e.code in ok:
             return e.code, {}
         return e.code, {"error": text[:300]}
+    except (urllib.error.URLError, OSError) as e:
+        # timeouts and dropped connections: 599 so call() retries them like a 5xx
+        return 599, {"error": f"{type(e).__name__}: {e}"}
 
 
-def must(status, body, what):
+def must(status, body, what, duplicate_ok=False):
+    if duplicate_ok and status >= 400 and "Duplicate entry" in str(body):
+        return body
     if status not in (200, 201):
         raise SystemExit(f"{what} failed: HTTP {status} {body}")
     return body
@@ -194,12 +201,12 @@ def seed_product(n, category_ids, value_ids, variation_ids):
         v = values[(n + a) % len(values)]
         s, b = call("POST", f"/v1/private/product/{pid}/attribute", {"option": {"id": OPTION_IDS[code]},
                     "optionValue": {"id": value_ids[(code, v)]}, "productAttributePrice": 0, "sortOrder": a})
-        must(s, b, f"attribute {code} on {sku}")
+        must(s, b, f"attribute {code} on {sku}", duplicate_ok=True)
     for k in range(VARIANTS):
         var = variation_ids[(n + k) % len(variation_ids)]
         s, b = call("POST", f"/v2/private/product/{pid}/variant", {"sku": f"{sku}-v{k}", "variation": var,
                     "available": True, "dateAvailable": "2026-01-01", "sortOrder": k})
-        must(s, b, f"variant {k} on {sku}")
+        must(s, b, f"variant {k} on {sku}", duplicate_ok=True)
     for k in range(IMAGES):
         body, ctype = multipart(f"{sku}-{k}.png", png(n * 10 + k))
         s, b = call("POST", f"/v1/private/product/{pid}/image", raw=body, content_type=ctype)
