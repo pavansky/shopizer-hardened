@@ -30,9 +30,32 @@ class PaymentConfigurationSecretsTest {
 				"webhookSecret", "signature", "accessKey", "apiToken", "PRIVATEKEY")) {
 			assertTrue(PaymentConfigurationSecrets.isSecretName(name), name);
 		}
-		for (String name : Arrays.asList("address", "merchant_id", "username", "note", "account")) {
+		for (String name : Arrays.asList("address", "merchant_id", "username", "note", "account", "USERNAME")) {
 			assertFalse(PaymentConfigurationSecrets.isSecretName(name), name);
 		}
+	}
+
+	@Test
+	void unknownNamesAreMaskedByDefault() {
+		for (String name : Arrays.asList("api", "credential", "somethingNew", "username2")) {
+			assertTrue(PaymentConfigurationSecrets.isSecretName(name), name);
+		}
+	}
+
+	@Test
+	void paypalExpressApiPasswordAndSignatureAreMasked() {
+		Map<String, String> masked = PaymentConfigurationSecrets.maskKeys(keys("username", "seller_api1.example.com",
+				"api", "PAYPALAPIPASS9876", "signature", "AFcWxV21C7fd0v3bYYYRCpSSRl31Abcd"));
+		assertEquals("seller_api1.example.com", masked.get("username"));
+		assertEquals("****9876", masked.get("api"));
+		assertEquals("****Abcd", masked.get("signature"));
+	}
+
+	@Test
+	void maskedPaypalApiPasswordOnWriteKeepsStoredValue() {
+		Map<String, String> merged = PaymentConfigurationSecrets.mergeKeys(keys("api", "****9876"),
+				keys("api", "PAYPALAPIPASS9876"));
+		assertEquals("PAYPALAPIPASS9876", merged.get("api"));
 	}
 
 	@Test

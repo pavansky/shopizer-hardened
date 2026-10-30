@@ -1,23 +1,27 @@
 package com.salesmanager.shop.store.facade.payment;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.regex.Pattern;
 
 import com.salesmanager.core.model.system.IntegrationConfiguration;
 
 /**
  * Rules that keep gateway secrets write-only through the API.
  * <ul>
- * <li>On read, every integration key whose name looks secret is replaced by
+ * <li>On read, every integration key is treated as secret and replaced by
  * {@code ****} and the last 4 characters (or only {@code ****} for values of 8
- * characters or fewer, where 4 characters would give away too much).</li>
+ * characters or fewer, where 4 characters would give away too much), except the
+ * names in {@link #NON_SECRET_NAMES}. Masking by default means a module whose
+ * credential has an unusual name (PayPal Express keeps its API password under
+ * {@code api}) is never returned in plain text.</li>
  * <li>On write, a secret key whose value is still masked means "unchanged": the
  * stored value is kept.</li>
  * </ul>
@@ -27,14 +31,23 @@ public final class PaymentConfigurationSecrets {
 	public static final String MASK = "****";
 	private static final int VISIBLE = 4;
 	private static final int MIN_LENGTH_TO_SHOW_SUFFIX = 9;
-	private static final Pattern SECRET_NAME = Pattern
-			.compile("(?i).*(key|secret|password|passwd|token|signature).*");
+
+	/**
+	 * Integration key names, used by the payment and shipping modules, that hold
+	 * identifiers or settings rather than credentials. Compared without case. Every
+	 * other name is masked.
+	 */
+	static final Set<String> NON_SECRET_NAMES = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+			"address", "note", "price", "transaction", // money order, store pickup, transaction type
+			"username", "userid", "account", // gateway and carrier login names
+			"merchant_id", "merchantid", // Braintree, Beanstream
+			"public_key", "client"))); // Braintree public key, PayPal REST client id
 
 	private PaymentConfigurationSecrets() {
 	}
 
 	public static boolean isSecretName(String name) {
-		return name != null && SECRET_NAME.matcher(name).matches();
+		return name == null || !NON_SECRET_NAMES.contains(name.toLowerCase(Locale.ROOT));
 	}
 
 	public static boolean isMasked(String value) {
