@@ -37,7 +37,7 @@ import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 @ExtendWith(MockitoExtension.class)
 class PaymentModuleConfigurationFacadeTest {
 
-	private static final String SECRET = "sk_live_abcdefgh1234";
+	private static final String SECRET = "sk_test_abcdefgh1234";
 
 	@Mock private PaymentService paymentService;
 	@Mock private ConfigurationAuditService auditService;
@@ -54,7 +54,7 @@ class PaymentModuleConfigurationFacadeTest {
 		stored.setModuleCode("stripe");
 		Map<String, String> keys = new HashMap<>();
 		keys.put("secretKey", SECRET);
-		keys.put("publishableKey", "pk_live_old_00001111");
+		keys.put("publishableKey", "pk_test_old_00001111");
 		stored.setIntegrationKeys(keys);
 	}
 
@@ -93,12 +93,12 @@ class PaymentModuleConfigurationFacadeTest {
 		stripeModuleKnown();
 		when(paymentService.getPaymentModulesConfigured(store)).thenReturn(Collections.singletonMap("stripe", stored));
 
-		Set<String> changed = facade.save(submitted("****1234", "pk_live_new_00002222"), store, "admin@shopizer.com");
+		Set<String> changed = facade.save(submitted("****1234", "pk_test_new_00002222"), store, "admin@shopizer.com");
 
 		ArgumentCaptor<IntegrationConfiguration> saved = ArgumentCaptor.forClass(IntegrationConfiguration.class);
 		verify(paymentService).savePaymentModuleConfiguration(saved.capture(), eq(store));
 		assertEquals(SECRET, saved.getValue().getIntegrationKeys().get("secretKey"));
-		assertEquals("pk_live_new_00002222", saved.getValue().getIntegrationKeys().get("publishableKey"));
+		assertEquals("pk_test_new_00002222", saved.getValue().getIntegrationKeys().get("publishableKey"));
 		assertEquals(Collections.singleton("publishableKey"), changed);
 		verify(auditService).record(store, ConfigurationAuditEntry.TYPE_PAYMENT, "stripe", "admin@shopizer.com",
 				changed);

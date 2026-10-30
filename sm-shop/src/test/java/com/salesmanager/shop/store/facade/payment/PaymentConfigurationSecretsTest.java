@@ -60,7 +60,7 @@ class PaymentConfigurationSecretsTest {
 
 	@Test
 	void maskShowsOnlyLastFourOfLongValues() {
-		assertEquals("****1234", PaymentConfigurationSecrets.mask("sk_live_abcdefgh1234"));
+		assertEquals("****1234", PaymentConfigurationSecrets.mask("sk_test_abcdefgh1234"));
 		assertEquals("****", PaymentConfigurationSecrets.mask("short123"));
 		assertEquals("", PaymentConfigurationSecrets.mask(""));
 		assertEquals(null, PaymentConfigurationSecrets.mask(null));
@@ -69,20 +69,20 @@ class PaymentConfigurationSecretsTest {
 	@Test
 	void readMasksSecretsAndLeavesOtherKeys() {
 		Map<String, String> masked = PaymentConfigurationSecrets
-				.maskKeys(keys("secretKey", "sk_live_abcdefgh1234", "address", "1 Main St"));
+				.maskKeys(keys("secretKey", "sk_test_abcdefgh1234", "address", "1 Main St"));
 		assertEquals("****1234", masked.get("secretKey"));
 		assertEquals("1 Main St", masked.get("address"));
 	}
 
 	@Test
 	void maskedValueOnWriteKeepsStoredSecret() {
-		Map<String, String> stored = keys("secretKey", "sk_live_abcdefgh1234", "publishableKey", "pk_live_old_00001111");
-		Map<String, String> submitted = keys("secretKey", "****1234", "publishableKey", "pk_live_new_00002222");
+		Map<String, String> stored = keys("secretKey", "sk_test_abcdefgh1234", "publishableKey", "pk_test_old_00001111");
+		Map<String, String> submitted = keys("secretKey", "****1234", "publishableKey", "pk_test_new_00002222");
 
 		Map<String, String> merged = PaymentConfigurationSecrets.mergeKeys(submitted, stored);
 
-		assertEquals("sk_live_abcdefgh1234", merged.get("secretKey"));
-		assertEquals("pk_live_new_00002222", merged.get("publishableKey"));
+		assertEquals("sk_test_abcdefgh1234", merged.get("secretKey"));
+		assertEquals("pk_test_new_00002222", merged.get("publishableKey"));
 	}
 
 	@Test
