@@ -347,6 +347,10 @@ public class CustomerFacadeImpl implements CustomerFacade {
       final MerchantStore merchantStore, Language language) throws Exception {
     LOG.info("Starting customer registration process..");
 
+    // A registration always creates a new customer. An id in the request body
+    // would make the save an update of that existing row, in any store.
+    customer.setId(null);
+
     if (userExist(customer.getUserName(), merchantStore)) {
       throw new UserAlreadyExistException("User already exist");
     }
@@ -585,6 +589,9 @@ public class CustomerFacadeImpl implements CustomerFacade {
 
 	//set customer user name
 	customer.setUserName(customer.getEmailAddress());
+	// Create never updates: an id in the body would overwrite that customer,
+	// even one of another store, and move it into this store.
+	customer.setId(null);
     if (userExist(customer.getUserName(), store)) {
       throw new ServiceRuntimeException("User already exist");
     }
@@ -993,6 +1000,12 @@ public class CustomerFacadeImpl implements CustomerFacade {
       Language language) {
 
     getCustomerById(customerId, merchantStore);
+
+    // A new review: never let a body id turn the save into an update of
+    // another review. The reviewer must be a customer of this store.
+    review.setId(null);
+    Validate.notNull(review.getCustomerId(), "Reviewer customer id is required");
+    getCustomerById(review.getCustomerId(), merchantStore);
 
     // rating already exist
     Optional<CustomerReview> customerReview =

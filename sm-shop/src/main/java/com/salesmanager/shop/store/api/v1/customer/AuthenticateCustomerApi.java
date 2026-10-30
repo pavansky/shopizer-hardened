@@ -94,11 +94,13 @@ public class AuthenticateCustomerApi {
     /**
      * Create new customer for a given MerchantStore, then authenticate that customer.
      *
-     * The response does not say whether the email is already registered in this
-     * store: the status (200) and body shape ({id, token}) are the same either way
-     * and no message names the account. When the email exists, nothing is created
-     * or changed. If the password also matches, the caller gets a token as on login;
-     * otherwise id and token are null.
+     * The status (200) and body shape ({id, token}) are the same whether or not
+     * the email is already registered in this store, and no message names the
+     * account. When the email exists, nothing is created or changed. If the
+     * password also matches, the caller gets a token as on login; otherwise id
+     * and token are null. A new email always gets a token, so the presence of a
+     * token still tells the two cases apart; closing that needs email
+     * verification before the first token is issued.
      */
     @RequestMapping( value={"/customer/register"}, method=RequestMethod.POST, produces ={ "application/json" })
     @ResponseStatus(HttpStatus.CREATED)
@@ -112,6 +114,9 @@ public class AuthenticateCustomerApi {
 			@ApiIgnore Language language) throws Exception {
 
 
+            // Registration only ever creates. An id in the body must not reach the
+            // save, where it would overwrite that customer in any store.
+            customer.setId(null);
             customer.setUserName(customer.getEmailAddress());
 
             // Validated before the existence check so a bad request fails the same

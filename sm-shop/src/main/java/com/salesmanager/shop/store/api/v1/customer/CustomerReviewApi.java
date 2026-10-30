@@ -85,7 +85,7 @@ public class CustomerReviewApi {
     return customerFacade.getAllCustomerReviewsByReviewed(id, merchantStore, language);
   }
 
-	@PutMapping("/private/customers/{id}/reviews/{reviewid}")
+	@PutMapping("/private/customers/{id}/reviews/{reviewId}")
   public PersistableCustomerReview update(
       @PathVariable final Long id,
       @PathVariable final Long reviewId,
