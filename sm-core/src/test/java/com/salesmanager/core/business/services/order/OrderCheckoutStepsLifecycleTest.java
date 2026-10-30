@@ -188,4 +188,36 @@ class OrderCheckoutStepsLifecycleTest {
 		verify(casUpdate, times(2)).setParameter("to", OrderStatus.PAYMENT_FAILED);
 		verify(stockUpdate).executeUpdate();
 	}
+
+	@Test
+	void statusUpdateClaimsTheOrderAndWritesTheHistory() {
+		when(casUpdate.executeUpdate()).thenReturn(1);
+
+		assertTrue(steps.markStatus(5L, OrderStatus.ORDERED, OrderStatus.DELIVERED, "shipped", true));
+
+		verify(casUpdate).setParameter("from", OrderStatus.ORDERED);
+		verify(casUpdate).setParameter("to", OrderStatus.DELIVERED);
+		OrderStatusHistory h = order.getOrderHistory().iterator().next();
+		assertEquals(OrderStatus.DELIVERED, h.getStatus());
+		assertEquals("shipped", h.getComments());
+		assertEquals(Integer.valueOf(1), h.getCustomerNotified());
+		verify(stockUpdate, never()).executeUpdate();
+	}
+
+	@Test
+	void statusUpdateThatLostToACancelChangesNothing() {
+		// a cancel set CANCELED after the order was read as ORDERED
+		when(casUpdate.executeUpdate()).thenReturn(0);
+
+		assertFalse(steps.markStatus(5L, OrderStatus.ORDERED, OrderStatus.DELIVERED, "shipped", true));
+
+		assertTrue(order.getOrderHistory().isEmpty());
+	}
+
+	@Test
+	void statusUpdateOutsideTheTransitionTableIsRejected() {
+		assertThrows(IllegalOrderStatusTransitionException.class,
+				() -> steps.markStatus(5L, OrderStatus.DELIVERED, OrderStatus.ORDERED, "x", false));
+		verify(casUpdate, never()).executeUpdate();
+	}
 }

@@ -143,4 +143,16 @@ public interface OrderCheckoutSteps {
 	 */
 	boolean markCanceled(Long orderId, OrderStatus from, boolean restock, Transaction moneyReturned,
 			Long attemptToClose, String comment) throws ServiceException;
+
+	/**
+	 * A plain status change (fulfilment: ORDERED, PROCESSED, DELIVERED). Claims
+	 * the order with a compare-and-set from -> to and writes the history entry
+	 * in the same transaction, so a change that raced with a cancel or a refund
+	 * cannot overwrite it.
+	 *
+	 * @return false when the order is no longer in status from
+	 * @throws IllegalOrderStatusTransitionException from -> to is not in the
+	 *         transition table
+	 */
+	boolean markStatus(Long orderId, OrderStatus from, OrderStatus to, String comment, boolean customerNotified);
 }

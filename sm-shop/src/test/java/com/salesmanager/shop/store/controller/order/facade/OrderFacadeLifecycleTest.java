@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -94,6 +96,7 @@ class OrderFacadeLifecycleTest {
 		inject("messages", messages);
 		when(orderService.getOrder(9L, store)).thenReturn(order);
 		when(transactionService.getRefundableAmount(any())).thenReturn(BigDecimal.ZERO);
+		when(steps.markStatus(anyLong(), any(), any(), anyString(), anyBoolean())).thenReturn(true);
 	}
 
 	private void inject(String name, Object value) throws Exception {
@@ -118,7 +121,7 @@ class OrderFacadeLifecycleTest {
 		assertThrows(ConflictException.class, () -> facade.updateOrderStatus(order, OrderStatus.PAYMENT_FAILED, store));
 
 		assertEquals(OrderStatus.ORDERED, order.getStatus());
-		verify(orderService, never()).addOrderStatusHistory(any(), any());
+		verify(steps, never()).markStatus(anyLong(), any(), any(), anyString(), anyBoolean());
 		verify(emails, never()).sendUpdateOrderStatusEmail(any(), any(), any(), any(), any(), any());
 	}
 
@@ -127,11 +130,24 @@ class OrderFacadeLifecycleTest {
 		facade.updateOrderStatus(order, OrderStatus.PROCESSED, store);
 
 		assertEquals(OrderStatus.PROCESSED, order.getStatus());
-		ArgumentCaptor<OrderStatusHistory> history = ArgumentCaptor.forClass(OrderStatusHistory.class);
-		verify(orderService).addOrderStatusHistory(eq(order), history.capture());
-		assertEquals(OrderStatus.PROCESSED, history.getValue().getStatus());
-		assertEquals(Integer.valueOf(1), history.getValue().getCustomerNotified());
+		// compare-and-set from the status that was read, history in the same step
+		verify(steps).markStatus(9L, OrderStatus.ORDERED, OrderStatus.PROCESSED, "Order status changed", true);
+		verify(orderService, never()).addOrderStatusHistory(any(), any());
 		verifyStatusEmail();
+	}
+
+	@Test
+	void statusUpdateThatLostARaceIsRefusedAndNotEmailed() throws Exception {
+		// a cancel committed CANCELED after this request read the order as ORDERED
+		when(steps.markStatus(9L, OrderStatus.ORDERED, OrderStatus.DELIVERED, "Order status changed", true))
+				.thenReturn(false);
+
+		ConflictException refused = assertThrows(ConflictException.class,
+				() -> facade.updateOrderStatus(order, OrderStatus.DELIVERED, store));
+
+		assertTrue(refused.getErrorMessage().contains("changed while"), refused.getErrorMessage());
+		assertEquals(OrderStatus.ORDERED, order.getStatus());
+		verify(emails, never()).sendUpdateOrderStatusEmail(any(), any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -228,7 +244,7 @@ class OrderFacadeLifecycleTest {
 				assertEquals(waiting, order.getStatus());
 			}
 		}
-		verify(orderService, never()).addOrderStatusHistory(any(), any());
+		verify(steps, never()).markStatus(anyLong(), any(), any(), anyString(), anyBoolean());
 		verify(emails, never()).sendUpdateOrderStatusEmail(any(), any(), any(), any(), any(), any());
 	}
 
@@ -250,9 +266,7 @@ class OrderFacadeLifecycleTest {
 
 		facade.updateOrderStatus(order, OrderStatus.PROCESSED, store);
 
-		ArgumentCaptor<OrderStatusHistory> history = ArgumentCaptor.forClass(OrderStatusHistory.class);
-		verify(orderService).addOrderStatusHistory(eq(order), history.capture());
-		assertEquals(Integer.valueOf(0), history.getValue().getCustomerNotified());
+		verify(steps).markStatus(9L, OrderStatus.ORDERED, OrderStatus.PROCESSED, "Order status changed", false);
 	}
 
 	@Test

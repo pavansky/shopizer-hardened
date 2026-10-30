@@ -2007,23 +2007,28 @@ public class OrderFacadeImpl implements OrderFacade {
 					+ " and has no settled payment; use POST /private/orders/" + order.getId()
 					+ "/payment/recheck to settle it with the gateway, or /cancel");
 		}
-		order.setStatus(newStatus);
-		OrderStatusHistory history = new OrderStatusHistory();
-
-		history.setComments( messages.getMessage("email.order.status.changed", new String[] {String.valueOf(oldStatus),
-				newStatus.name()}, LocaleUtils.getLocale(store)));
+		String comment = messages.getMessage("email.order.status.changed", new String[] {String.valueOf(oldStatus),
+				newStatus.name()}, LocaleUtils.getLocale(store));
 		// 1 means the status email was queued; the send itself is asynchronous
-		history.setCustomerNotified(emailsEnabled() && hasEmailAddress(order) ? 1 : 0);
-		history.setStatus(newStatus);
-		history.setDateAdded(new Date() );
-
+		boolean notified = emailsEnabled() && hasEmailAddress(order);
+		// Compare-and-set on the status read above: a cancel or refund that committed in
+		// the meantime is not overwritten (the order would show DELIVERED with the money
+		// refunded and the stock returned).
+		boolean changed;
 		try {
-			orderService.addOrderStatusHistory(order, history);
-		} catch (ServiceException e) {
+			changed = orderCheckoutSteps.markStatus(order.getId(), oldStatus, newStatus, comment, notified);
+		} catch (IllegalOrderStatusTransitionException e) {
+			throw e;
+		} catch (RuntimeException e) {
 			// the change was not saved; answering 200 here would tell the admin it was
 			throw new ServiceRuntimeException("Status of order [" + order.getId() + "] not saved", e);
 		}
-		notifyStatus(order, store, history.getComments());
+		if (!changed) {
+			throw new ConflictException("Order id [" + order.getId() + "] changed while its status was being updated"
+					+ " from " + oldStatus + "; reload it and try again");
+		}
+		order.setStatus(newStatus);
+		notifyStatus(order, store, comment);
 
 	}
 }

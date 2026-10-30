@@ -303,6 +303,21 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 		return true;
 	}
 
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public boolean markStatus(Long orderId, OrderStatus from, OrderStatus to, String comment,
+			boolean customerNotified) {
+		if (!compareAndSet(orderId, from, to)) {
+			return false;
+		}
+		Order order = em.find(Order.class, orderId);
+		em.refresh(order);
+		OrderStatusHistory h = history(order, to, StringUtils.abbreviate(comment, 250));
+		h.setCustomerNotified(customerNotified ? 1 : 0);
+		order.getOrderHistory().add(h);
+		return true;
+	}
+
 	/** PAYMENT_PENDING -> to; also PAYMENT_REVIEW -> to when fromReview. */
 	private boolean claim(Long orderId, OrderStatus to, boolean fromReview) {
 		return compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, to)
