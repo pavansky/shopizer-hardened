@@ -1,5 +1,6 @@
 package com.salesmanager.shop.mapper.catalog.product;
 
+import com.salesmanager.shop.utils.RichTextSanitizer;
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -173,9 +174,10 @@ public class PersistableProductMapper implements Mapper<PersistableProduct, Prod
 				    }
 
 					productDescription.setProduct(destination);
-					productDescription.setDescription(description.getDescription());
+					// merchant HTML is rendered by the storefront: strip scripts and event handlers
+					productDescription.setDescription(RichTextSanitizer.sanitize(description.getDescription()));
 
-					productDescription.setProductHighlight(description.getHighlights());
+					productDescription.setProductHighlight(RichTextSanitizer.sanitize(description.getHighlights()));
 
 					productDescription.setName(description.getName());
 					productDescription.setSeUrl(description.getFriendlyUrl());

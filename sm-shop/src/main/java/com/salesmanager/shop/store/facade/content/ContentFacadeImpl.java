@@ -1,5 +1,6 @@
 package com.salesmanager.shop.store.facade.content;
 
+import com.salesmanager.shop.utils.RichTextSanitizer;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -374,7 +375,8 @@ public class ContentFacadeImpl implements ContentFacade {
 			contentDescription.setTitle(objectContent.getTitle());
 			contentDescription.setName(objectContent.getName());
 			contentDescription.setSeUrl(objectContent.getFriendlyUrl());
-			contentDescription.setDescription(objectContent.getDescription());
+			// merchant HTML is rendered by the storefront: strip scripts and event handlers
+			contentDescription.setDescription(RichTextSanitizer.sanitize(objectContent.getDescription()));
 			contentDescription.setMetatagTitle(objectContent.getTitle());
 			contentDescription.setContent(contentModel);
 			contentDescription.setLanguage(lang);
