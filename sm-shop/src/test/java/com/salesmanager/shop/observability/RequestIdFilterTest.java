@@ -7,6 +7,8 @@ import static org.junit.Assert.assertTrue;
 
 import java.util.UUID;
 
+import javax.servlet.DispatcherType;
+
 import org.junit.Test;
 import org.slf4j.MDC;
 import org.springframework.mock.web.MockFilterChain;
@@ -67,6 +69,29 @@ public class RequestIdFilterTest {
 		} catch (IllegalStateException expected) {
 			// rethrown as is
 		}
+		assertNull(MDC.get(RequestIdFilter.MDC_KEY));
+	}
+
+	@Test
+	public void errorDispatchKeepsTheIdOfTheFailedRequest() throws Exception {
+		MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/products");
+		MockHttpServletResponse response = new MockHttpServletResponse();
+		filter.doFilter(request, response, new MockFilterChain());
+		String id = response.getHeader(RequestIdFilter.HEADER);
+
+		// the container then forwards the same request to /error
+		request.setDispatcherType(DispatcherType.ERROR);
+		MockHttpServletResponse errorResponse = new MockHttpServletResponse();
+		String[] seenInChain = new String[1];
+		filter.doFilter(request, errorResponse, new MockFilterChain() {
+			@Override
+			public void doFilter(javax.servlet.ServletRequest req, javax.servlet.ServletResponse res) {
+				seenInChain[0] = MDC.get(RequestIdFilter.MDC_KEY);
+			}
+		});
+
+		assertEquals("error page log lines carry the request's id", id, seenInChain[0]);
+		assertEquals(id, errorResponse.getHeader(RequestIdFilter.HEADER));
 		assertNull(MDC.get(RequestIdFilter.MDC_KEY));
 	}
 }
