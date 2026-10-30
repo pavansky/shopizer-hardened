@@ -35,6 +35,7 @@ import com.salesmanager.shop.store.security.ServicesAuthenticationSuccessHandler
 import com.salesmanager.shop.store.security.abuse.AbuseProtectionConfig;
 import com.salesmanager.shop.store.security.abuse.ClientIpResolver;
 import com.salesmanager.shop.store.security.abuse.LockoutAuthenticationProvider;
+import com.salesmanager.shop.store.security.abuse.PasswordFirstDaoAuthenticationProvider;
 import com.salesmanager.shop.store.security.abuse.LoginAttemptTracker;
 import com.salesmanager.shop.store.security.abuse.RateLimitFilter;
 import com.salesmanager.shop.store.security.abuse.TokenBucketLimiter;
@@ -250,9 +251,8 @@ public class MultipleEntryPointsSecurityConfig {
 		/** HTTP Basic with admin credentials, behind the same lockout as the admin login. */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-			DaoAuthenticationProvider dao = new DaoAuthenticationProvider();
-			dao.setUserDetailsService(userDetailsService);
-			dao.setPasswordEncoder(passwordEncoder);
+			DaoAuthenticationProvider dao = new PasswordFirstDaoAuthenticationProvider(userDetailsService,
+					passwordEncoder);
 			dao.afterPropertiesSet();
 			auth.authenticationProvider(
 					new LockoutAuthenticationProvider("admin", dao, loginAttemptTracker, clientIpResolver));
@@ -601,14 +601,14 @@ public class MultipleEntryPointsSecurityConfig {
 		private String tokenHeader;
 
 		/**
-		 * Customer login: the standard DAO provider (unknown users and wrong
-		 * passwords both fail as bad credentials) behind the per-account lockout.
+		 * Customer login: the DAO provider (unknown users and wrong passwords both
+		 * fail as bad credentials; the password is hashed before the account status
+		 * is checked) behind the login lockout.
 		 */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-			DaoAuthenticationProvider dao = new DaoAuthenticationProvider();
-			dao.setUserDetailsService(jwtCustomerDetailsService);
-			dao.setPasswordEncoder(passwordEncoder);
+			DaoAuthenticationProvider dao = new PasswordFirstDaoAuthenticationProvider(jwtCustomerDetailsService,
+					passwordEncoder);
 			dao.afterPropertiesSet();
 			auth.authenticationProvider(
 					new LockoutAuthenticationProvider("customer", dao, loginAttemptTracker, clientIpResolver));
