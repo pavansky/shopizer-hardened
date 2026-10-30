@@ -47,6 +47,7 @@ import com.salesmanager.shop.model.order.v0.ReadableOrderList;
 import com.salesmanager.shop.populator.order.transaction.PersistablePaymentPopulator;
 import com.salesmanager.shop.populator.order.transaction.ReadableTransactionPopulator;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
+import com.salesmanager.shop.store.api.v1.payment.PaymentErrorResolver;
 import com.salesmanager.shop.store.controller.order.facade.OrderFacade;
 import com.salesmanager.shop.utils.AuthorizationUtils;
 
@@ -172,6 +173,9 @@ public class OrderPaymentApi {
 			return transaction;
 
 		} catch (Exception e) {
+			if (PaymentErrorResolver.handles(e)) {
+				throw e;
+			}
 			LOGGER.error("Error while initializing the payment", e);
 			try {
 				response.sendError(503, "Error while initializing the payment " + e.getMessage());
