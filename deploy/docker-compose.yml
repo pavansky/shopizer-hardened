@@ -46,6 +46,10 @@ services:
         -Dconfig.reconciliation.pendingOrders.delayMs=${RECONCILE_DELAY_MS:-300000}
         -Dshopizer.cors.allowed-origins=http://localhost:${STOREFRONT_PORT:-3000},http://localhost:${ADMIN_PORT:-4200}
       STRIPE_TEST_SECRET_KEY: ${STRIPE_TEST_SECRET_KEY:-}
+      # AES-256-GCM key for stored gateway credentials (openssl rand -base64 32). Losing it makes them unreadable.
+      SHOPIZER_ENCRYPTION_KEY: ${SHOPIZER_ENCRYPTION_KEY:?set SHOPIZER_ENCRYPTION_KEY in deploy/.env (openssl rand -base64 32)}
+      # Only to read configuration saved before v2 encryption; values are re-encrypted on the next save.
+      SHOPIZER_LEGACY_SECRET_KEY: ${SHOPIZER_LEGACY_SECRET_KEY:-}
       # one JSON object per log line, with requestId; unset for the readable pattern
       LOG_FORMAT: ${LOG_FORMAT:-json}
       # order emails go to Mailpit; open http://localhost:8025 to read them
