@@ -30,6 +30,7 @@ import com.salesmanager.shop.admin.security.UserAuthenticationSuccessHandler;
 import com.salesmanager.shop.admin.security.WebUserServices;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.security.AuthenticationTokenFilter;
+import com.salesmanager.shop.store.security.JWTTokenUtil;
 import com.salesmanager.shop.store.security.ServicesAuthenticationSuccessHandler;
 import com.salesmanager.shop.store.security.abuse.AbuseProtectionConfig;
 import com.salesmanager.shop.store.security.abuse.ClientIpResolver;
@@ -38,6 +39,7 @@ import com.salesmanager.shop.store.security.abuse.LoginAttemptTracker;
 import com.salesmanager.shop.store.security.abuse.RateLimitFilter;
 import com.salesmanager.shop.store.security.abuse.TokenBucketLimiter;
 import com.salesmanager.shop.store.security.admin.AdminSelfAccess;
+import com.salesmanager.shop.store.security.admin.AdminTokenRefreshGuard;
 import com.salesmanager.shop.store.security.admin.JWTAdminAuthenticationProvider;
 import com.salesmanager.shop.store.security.audit.AdminAuditFilter;
 import com.salesmanager.shop.store.security.admin.JWTAdminServicesImpl;
@@ -589,6 +591,15 @@ public class MultipleEntryPointsSecurityConfig {
 		@Autowired
 		private ClientIpResolver clientIpResolver;
 
+		@Autowired
+		private JWTTokenUtil jwtTokenUtil;
+
+		@Autowired
+		private JWTAdminServicesImpl jwtAdminDetailsService;
+
+		@org.springframework.beans.factory.annotation.Value("${authToken.header}")
+		private String tokenHeader;
+
 		/**
 		 * Customer login: the standard DAO provider (unknown users and wrong
 		 * passwords both fail as bad credentials) behind the per-account lockout.
@@ -603,10 +614,17 @@ public class MultipleEntryPointsSecurityConfig {
 					new LockoutAuthenticationProvider("customer", dao, loginAttemptTracker, clientIpResolver));
 		}
 
-		/** Stateless like the admin API: the bearer token is checked on every request. */
+		/**
+		 * Stateless like the admin API: the bearer token is checked on every request.
+		 * The admin token refresh (/auth/refresh) is mapped on this chain; the guard
+		 * refuses tokens the admin API would no longer accept.
+		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
 			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
+			// after the token filter, which sets the CORS headers the admin UI needs to read the 401
+			http.addFilterBefore(new AdminTokenRefreshGuard(jwtTokenUtil, jwtAdminDetailsService, tokenHeader),
+					ExceptionTranslationFilter.class);
 			http
 			
 				.antMatcher(API_VERSION + "/auth/**")

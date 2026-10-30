@@ -99,6 +99,11 @@ class AdminLoginAndSessionIntegrationTest extends ServicesTestSupport {
 				String.class).getStatusCode();
 	}
 
+	private HttpStatus refresh(HttpHeaders headers) {
+		return testRestTemplate.exchange("/api/v1/auth/refresh", HttpMethod.GET, new HttpEntity<>(headers),
+				String.class).getStatusCode();
+	}
+
 	@Test
 	void deactivatedAdminLosesAccessOnTheNextRequest() {
 		ReadableUser staff = createAdmin("deactivate-me@test.com", "Password1");
@@ -115,6 +120,7 @@ class AdminLoginAndSessionIntegrationTest extends ServicesTestSupport {
 		assertEquals(HttpStatus.OK, patched.getStatusCode(), patched.toString());
 
 		assertEquals(HttpStatus.UNAUTHORIZED, profile(staffToken));
+		assertEquals(HttpStatus.UNAUTHORIZED, refresh(staffToken));
 		assertEquals(HttpStatus.UNAUTHORIZED,
 				login("/api/v1/private/login", "deactivate-me@test.com", "Password1").getStatusCode());
 	}
@@ -170,6 +176,10 @@ class AdminLoginAndSessionIntegrationTest extends ServicesTestSupport {
 		assertEquals(HttpStatus.OK, changed.getStatusCode(), changed.toString());
 
 		assertEquals(HttpStatus.UNAUTHORIZED, profile(oldToken));
-		assertEquals(HttpStatus.OK, profile(bearer("rotate-me@test.com", "Password2")));
+		// the admin UI refreshes on every 401: the old token must not be renewed either
+		assertEquals(HttpStatus.UNAUTHORIZED, refresh(oldToken));
+		HttpHeaders newToken = bearer("rotate-me@test.com", "Password2");
+		assertEquals(HttpStatus.OK, profile(newToken));
+		assertEquals(HttpStatus.OK, refresh(newToken));
 	}
 }
