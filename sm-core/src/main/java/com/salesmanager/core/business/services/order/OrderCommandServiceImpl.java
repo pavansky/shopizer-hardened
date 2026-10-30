@@ -7,11 +7,13 @@ import javax.inject.Inject;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.order.reconciliation.PaymentGateways;
 import com.salesmanager.core.business.services.order.reconciliation.PendingOrderQueries;
+import com.salesmanager.core.business.services.order.reconciliation.ReconciliationMetrics;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.TransactionService;
 import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
@@ -22,6 +24,9 @@ import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.PaymentAttemptStatus;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
+import com.salesmanager.core.modules.integration.payment.model.PaymentCompensation;
+import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
+import com.salesmanager.core.modules.integration.payment.model.PaymentStatusLookup;
 
 /**
  * Not transactional itself: the refund and the gateway calls each commit on
@@ -53,6 +58,9 @@ public class OrderCommandServiceImpl implements OrderCommandService {
 	@Inject
 	private OrderCheckoutSteps steps;
 
+	@Inject
+	private ObjectProvider<ReconciliationMetrics> metrics;
+
 	@Override
 	public String cancel(Order order, MerchantStore store, String comment) throws ServiceException {
 		OrderStatus from = order.getStatus();
@@ -81,7 +89,17 @@ public class OrderCommandServiceImpl implements OrderCommandService {
 		BigDecimal remaining = transactionService.getRefundableAmount(order);
 		if (transactionService.getRefundableTransaction(order) != null && remaining.signum() > 0) {
 			// Moves the order to REFUNDED and records the REFUND; the cancel completes from there.
-			paymentService.processRefund(order, null, store, remaining);
+			try {
+				paymentService.processRefund(order, null, store, remaining);
+			} catch (ServiceException e) {
+				if (e.getExceptionType() == ServiceException.EXCEPTION_VALIDATION) {
+					// processRefund re-reads the refundable amount under the order lock: a
+					// concurrent cancel or refund already returned the money
+					throw new OrderCommandRefusedException("Order " + order.getId()
+							+ " changed while it was being canceled: " + e.getMessage());
+				}
+				throw e;
+			}
 			return finish(order, OrderStatus.REFUNDED, true, null, null,
 					note(comment, "Canceled, refunded " + amount(remaining, order)));
 		}
@@ -147,12 +165,44 @@ public class OrderCommandServiceImpl implements OrderCommandService {
 		case FAILED:
 			return finish(order, from, true, null, attempt.getId(), note(comment, "Canceled, the payment had failed"));
 		default:
-			// Unknown or not yet visible at the gateway: the attempt stays open, so the orphan
-			// pass returns the money if the charge turns out to have gone through.
+			// Not final or not visible at the gateway yet. The attempt stays open either way.
+			if (lateChargeIsReturnedAutomatically(attempt, status)) {
+				// the orphan pass keeps asking and returns the money if the charge went through
+				return finish(order, from, true, null, null, note(comment,
+						"Canceled; payment outcome not confirmed (" + status.getOutcome()
+								+ "), any late charge is returned automatically"));
+			}
+			// Nobody will ever get an answer for this attempt (a module without a status
+			// lookup or compensation, or a charge the module cannot search for), so a
+			// person has to check the gateway.
+			LOGGER.error("Order {} canceled with payment attempt {} of module {} in an unknown state ({}); the"
+					+ " shop cannot ask the gateway. Check the gateway and refund by hand if the customer was charged.",
+					orderId, attempt.getAttemptRef(), attempt.getModuleCode(), status);
+			if (metrics != null) {
+				metrics.ifAvailable(ReconciliationMetrics::compensationNeeded);
+			}
 			return finish(order, from, true, null, null, note(comment,
-					"Canceled; payment outcome not confirmed (" + status.getOutcome()
-							+ "), any late charge is returned automatically"));
+					"Canceled; the payment outcome is unknown and cannot be checked automatically (" + status
+							+ "). Any charge is checked at the payment provider and refunded by hand"));
 		}
+	}
+
+	/**
+	 * True when the reconciler's orphan pass can settle this attempt later: the
+	 * module can both look up and return a charge, and the lookup actually found
+	 * something to follow (a gateway id) or reported that nothing exists yet.
+	 * A PENDING answer without a gateway id is what a module gives when it cannot
+	 * look the payment up at all, for example a Stripe charge made without an
+	 * attempt reference.
+	 */
+	private boolean lateChargeIsReturnedAutomatically(PaymentAttempt attempt, GatewayPaymentStatus status)
+			throws ServiceException {
+		PaymentModule module = paymentService.getPaymentModule(attempt.getModuleCode());
+		if (!(module instanceof PaymentStatusLookup) || !(module instanceof PaymentCompensation)) {
+			return false;
+		}
+		return status.getOutcome() == GatewayPaymentStatus.Outcome.NOT_FOUND
+				|| StringUtils.isNotBlank(status.getGatewayTransactionId());
 	}
 
 	/**

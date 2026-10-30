@@ -1,5 +1,7 @@
 package com.salesmanager.core.business.services.order;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -14,6 +16,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
@@ -21,10 +24,12 @@ import java.math.BigDecimal;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
+import org.springframework.beans.factory.ObjectProvider;
 
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.order.reconciliation.PaymentGateways;
 import com.salesmanager.core.business.services.order.reconciliation.PendingOrderQueries;
+import com.salesmanager.core.business.services.order.reconciliation.ReconciliationMetrics;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.TransactionService;
 import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
@@ -35,6 +40,9 @@ import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.PaymentAttemptStatus;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentStatus;
+import com.salesmanager.core.modules.integration.payment.model.PaymentCompensation;
+import com.salesmanager.core.modules.integration.payment.model.PaymentModule;
+import com.salesmanager.core.modules.integration.payment.model.PaymentStatusLookup;
 
 class OrderCommandServiceCancelTest {
 
@@ -45,6 +53,7 @@ class OrderCommandServiceCancelTest {
 	private PaymentGateways gateways;
 	private PendingOrderQueries queries;
 	private OrderCheckoutSteps steps;
+	private ObjectProvider<ReconciliationMetrics> metrics;
 	private final MerchantStore store = new MerchantStore();
 	private final Order order = new Order();
 
@@ -63,6 +72,10 @@ class OrderCommandServiceCancelTest {
 		inject("gateways", gateways);
 		inject("queries", queries);
 		inject("steps", steps);
+		@SuppressWarnings("unchecked")
+		ObjectProvider<ReconciliationMetrics> provider = mock(ObjectProvider.class);
+		metrics = provider;
+		inject("metrics", metrics);
 		store.setId(1);
 		order.setId(9L);
 		when(transactionService.getRefundableAmount(order)).thenReturn(BigDecimal.ZERO);
@@ -166,18 +179,85 @@ class OrderCommandServiceCancelTest {
 		verify(paymentService, never()).processRefund(any(), any(), any(), any());
 	}
 
+	private PaymentModule moduleWithLookupAndCompensation() {
+		return mock(PaymentModule.class,
+				withSettings().extraInterfaces(PaymentStatusLookup.class, PaymentCompensation.class));
+	}
+
 	@Test
-	void reviewOrderWithoutAGatewayAnswerKeepsTheAttemptOpen() throws Exception {
+	void pendingChargeTheGatewayKnowsIsLeftToTheOrphanPass() throws Exception {
 		order.setStatus(OrderStatus.PAYMENT_REVIEW);
 		PaymentAttempt a = attempt(PaymentAttemptStatus.UNKNOWN);
 		when(attempts.latestForOrder(9L)).thenReturn(a);
-		when(gateways.lookup(a)).thenReturn(GatewayPaymentStatus.pending(null, "no status lookup"));
+		PaymentModule stripe = moduleWithLookupAndCompensation();
+		when(paymentService.getPaymentModule("stripe3")).thenReturn(stripe);
+		when(gateways.lookup(a)).thenReturn(GatewayPaymentStatus.pending("pi_4", "processing"));
 
-		service.cancel(order, store, null);
+		String done = service.cancel(order, store, null);
 
 		verify(gateways, never()).compensate(any(), any());
-		// attempt left open (null): the orphan pass returns a late charge
+		// attempt left open (null): the orphan pass keeps asking and returns a late charge
 		verify(steps).markCanceled(eq(9L), eq(OrderStatus.PAYMENT_REVIEW), eq(true), isNull(), isNull(), anyString());
+		assertTrue(done.contains("returned automatically"), done);
+		verify(metrics, never()).ifAvailable(any());
+	}
+
+	@Test
+	void unknownOutcomeOfAModuleWithoutLookupAsksForAManualCheck() throws Exception {
+		order.setStatus(OrderStatus.PAYMENT_REVIEW);
+		PaymentAttempt a = attempt(PaymentAttemptStatus.UNKNOWN);
+		a.setModuleCode("moneyorder");
+		when(attempts.latestForOrder(9L)).thenReturn(a);
+		when(paymentService.getPaymentModule("moneyorder")).thenReturn(mock(PaymentModule.class));
+		when(gateways.lookup(a)).thenReturn(GatewayPaymentStatus.pending(null, "module moneyorder has no status lookup"));
+
+		String done = service.cancel(order, store, null);
+
+		verify(steps).markCanceled(eq(9L), eq(OrderStatus.PAYMENT_REVIEW), eq(true), isNull(), isNull(), anyString());
+		assertTrue(done.contains("refunded by hand"), done);
+		assertFalse(done.contains("returned automatically"), done);
+		verify(metrics).ifAvailable(any());
+	}
+
+	@Test
+	void chargeTheModuleCannotSearchForAsksForAManualCheck() throws Exception {
+		// a Stripe charge made without an attempt reference: lookup answers PENDING without an id
+		order.setStatus(OrderStatus.PAYMENT_REVIEW);
+		PaymentAttempt a = attempt(PaymentAttemptStatus.UNKNOWN);
+		when(attempts.latestForOrder(9L)).thenReturn(a);
+		PaymentModule stripe = moduleWithLookupAndCompensation();
+		when(paymentService.getPaymentModule("stripe3")).thenReturn(stripe);
+		when(gateways.lookup(a)).thenReturn(GatewayPaymentStatus.pending(null, "no attempt reference to search on"));
+
+		String done = service.cancel(order, store, null);
+
+		assertTrue(done.contains("refunded by hand"), done);
+		verify(metrics).ifAvailable(any());
+	}
+
+	@Test
+	void secondConcurrentCancelOfACapturedOrderIsRefusedNotAPaymentError() throws Exception {
+		order.setStatus(OrderStatus.ORDERED);
+		when(transactionService.getRefundableTransaction(order)).thenReturn(new Transaction());
+		when(transactionService.getRefundableAmount(order)).thenReturn(new BigDecimal("149.00"));
+		// under the order lock processRefund finds nothing left: the first cancel refunded it
+		when(paymentService.processRefund(order, null, store, new BigDecimal("149.00"))).thenThrow(
+				new ServiceException(ServiceException.EXCEPTION_VALIDATION, "Invalid refund amount 149.00"));
+
+		assertThrows(OrderCommandRefusedException.class, () -> service.cancel(order, store, null));
+		verify(steps, never()).markCanceled(anyLong(), any(), anyBoolean(), any(), any(), anyString());
+	}
+
+	@Test
+	void gatewayRefundFailureStaysAPaymentError() throws Exception {
+		order.setStatus(OrderStatus.ORDERED);
+		when(transactionService.getRefundableTransaction(order)).thenReturn(new Transaction());
+		when(transactionService.getRefundableAmount(order)).thenReturn(new BigDecimal("149.00"));
+		when(paymentService.processRefund(order, null, store, new BigDecimal("149.00")))
+				.thenThrow(new ServiceException(ServiceException.EXCEPTION_ERROR, "gateway down"));
+
+		ServiceException e = assertThrows(ServiceException.class, () -> service.cancel(order, store, null));
+		assertEquals("gateway down", e.getMessage());
 	}
 
 	@Test

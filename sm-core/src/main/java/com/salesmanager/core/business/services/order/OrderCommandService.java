@@ -56,8 +56,11 @@ public interface OrderCommandService {
 	 * <li>an authorisation that was never captured is voided at the gateway;</li>
 	 * <li>a PAYMENT_PENDING or PAYMENT_REVIEW order is checked with the gateway,
 	 * and a charge the gateway did take is returned before the order is
-	 * cancelled. While the outcome is still unknown the attempt stays open, and
-	 * the reconciler's orphan pass returns a late charge.</li>
+	 * cancelled. While the outcome is still unknown the attempt stays open; when
+	 * the module can look the payment up and return it, the reconciler's orphan
+	 * pass returns a late charge, otherwise the history says the charge must be
+	 * checked and refunded by hand and the case is logged and counted as
+	 * compensation needed.</li>
 	 * </ul>
 	 * The reserved stock is returned (not for PAYMENT_FAILED orders, whose stock
 	 * was already returned) and the order moves to CANCELED with a history

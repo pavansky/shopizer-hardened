@@ -241,8 +241,17 @@ public class OrderLifecycleIntegrationTest extends ServicesTestSupport {
 		assertEquals("PAYMENT_REVIEW", status(id));
 		assertEquals(4, stock("lifecycle-review"));
 
+		// talking point 4: money order has no status lookup, so the re-check leaves it in review
+		Map<String, Object> rechecked = call(HttpMethod.POST, base + "/payment/recheck", null, HttpStatus.OK);
+		assertEquals("PAYMENT_REVIEW", rechecked.get("status"));
+		assertTrue(((String) rechecked.get("message")).contains("not confirmed"), (String) rechecked.get("message"));
+		assertEquals("PAYMENT_REVIEW", status(id));
+		assertEquals(4, stock("lifecycle-review"));
+
 		Map<String, Object> canceled = call(HttpMethod.POST, base + "/cancel", null, HttpStatus.OK);
 		assertEquals("CANCELED", canceled.get("status"));
+		// nobody can ask the gateway about this attempt: the history says so instead of promising a refund
+		assertTrue(((String) canceled.get("message")).contains("refunded by hand"), (String) canceled.get("message"));
 		assertEquals(5, stock("lifecycle-review"));
 	}
 
