@@ -22,8 +22,9 @@ import com.salesmanager.shop.store.security.abuse.ClientIpResolver;
 
 /**
  * Writes one ADMIN_AUDIT row for every POST, PUT, PATCH or DELETE that reaches
- * the admin API with an authenticated principal, including requests refused
- * with 403. It sits in the admin security chain before the exception
+ * the admin API (/api/v* /private, /api/v* /sec/private) or the legacy
+ * /services API with an authenticated principal, including requests refused
+ * with 403. It sits in those security chains before the exception
  * translation filter, so the principal is still known and the final status
  * (2xx, 4xx or 403) is set when the row is written. Bodies are never read.
  * A failure to write the row is logged and does not fail the request.

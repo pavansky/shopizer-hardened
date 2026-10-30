@@ -207,6 +207,12 @@ public class MultipleEntryPointsSecurityConfig {
 		@Autowired
 		private LoginAttemptTracker loginAttemptTracker;
 
+		@Autowired
+		private ClientIpResolver clientIpResolver;
+
+		@Autowired
+		private AdminAuditEventRepository adminAuditEventRepository;
+
 		/** HTTP Basic with admin credentials, behind the same lockout as the admin login. */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
@@ -219,7 +225,8 @@ public class MultipleEntryPointsSecurityConfig {
 
 		/**
 		 * Stateless: credentials are checked on every request, so a deactivated
-		 * account or a changed password takes effect immediately.
+		 * account or a changed password takes effect immediately. Mutating
+		 * requests are written to ADMIN_AUDIT like on the admin API.
 		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
@@ -228,6 +235,8 @@ public class MultipleEntryPointsSecurityConfig {
 			.csrf().disable()
 			.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
 			.and()
+			.addFilterBefore(new AdminAuditFilter(adminAuditEventRepository, clientIpResolver),
+					ExceptionTranslationFilter.class)
 					.authorizeRequests()
 					.antMatchers("/services/public/**").permitAll()
 					// module installation and opt-in setup: administrators only
