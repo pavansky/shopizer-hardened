@@ -2,11 +2,11 @@ package com.salesmanager.core.business.services.tax;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 
 import javax.inject.Inject;
 
@@ -231,7 +231,7 @@ public class TaxServiceImpl
 		}
 
 		//one tax line per rate code, rates of a class only apply to that class
-		Map<String,TaxItem> taxItemsMap = new TreeMap<String,TaxItem>();
+		Map<String,TaxItem> taxItemsMap = new LinkedHashMap<String,TaxItem>();
 		for(Map.Entry<Long,BigDecimal> entry : taxClassAmountMap.entrySet()) {
 
 			TaxClass taxClass = taxClasses.get(entry.getKey());
@@ -266,7 +266,10 @@ public class TaxServiceImpl
 			return null;
 		}
 
-		return new ArrayList<TaxItem>(taxItemsMap.values());
+		//receipt order: by tax priority, so a compound tax follows the tax it compounds
+		List<TaxItem> taxItems = new ArrayList<TaxItem>(taxItemsMap.values());
+		taxItems.sort(Comparator.comparingInt((TaxItem t) -> priority(t.getTaxRate())));
+		return taxItems;
 
 	}
 
@@ -293,6 +296,10 @@ public class TaxServiceImpl
 					store.getCode(), TaxClass.DEFAULT_TAX_CLASS, storeClasses.size());
 		}
 		return null;
+	}
+
+	private static int priority(TaxRate taxRate) {
+		return taxRate!=null && taxRate.getTaxPriority()!=null ? taxRate.getTaxPriority() : 0;
 	}
 
 	/**

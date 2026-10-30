@@ -252,6 +252,20 @@ class TaxServiceImplGoldenTest {
 	}
 
 	@Test
+	void taxLinesAreListedByPriorityNotByCode() throws Exception {
+		TaxRate base = rate("ZZ_BASE", "5", quebec, standard, false);
+		TaxRate compound = rate("AA_COMPOUND", "10", quebec, standard, true);
+		base.setTaxPriority(0);
+		compound.setTaxPriority(1);
+		rates.addAll(Arrays.asList(base, compound));
+
+		List<TaxItem> items = service.calculateTax(summary(line("100.00", 1, null)), customer(quebec, quebec), store, english);
+
+		assertEquals(Arrays.asList("ZZ_BASE", "AA_COMPOUND"),
+				items.stream().map(i -> i.getTaxRate().getCode()).collect(Collectors.toList()));
+	}
+
+	@Test
 	void noCustomerMeansNoTax() throws Exception {
 		rates.add(rate("STD", "10", quebec, standard, false));
 		assertEquals(null, service.calculateTax(summary(line("100.00", 1, null)), null, store, english));
