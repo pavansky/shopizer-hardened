@@ -2,7 +2,9 @@ package com.salesmanager.shop.store.api.v1.seo;
 
 import java.text.SimpleDateFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import javax.inject.Inject;
@@ -30,6 +32,10 @@ import io.swagger.annotations.ApiOperation;
  *
  * <p>URLs are absolute and point at the storefront, not at this API, so the base
  * URL is configured with {@code shopizer.storefront.base-url}.
+ *
+ * <p>The endpoint is public, so the rendered document is kept per store for
+ * {@code shopizer.sitemap.cache-seconds} (default 300) and repeated requests do
+ * not reach the database. Only existing stores are cached, which bounds the map.
  */
 @RestController
 @RequestMapping("/api/v1")
@@ -47,6 +53,21 @@ public class SitemapApi {
   @Value("${shopizer.storefront.base-url:http://localhost:3000}")
   private String storefrontBaseUrl = "http://localhost:3000";
 
+  @Value("${shopizer.sitemap.cache-seconds:300}")
+  private long cacheSeconds = 300;
+
+  private final Map<String, Cached> cache = new ConcurrentHashMap<>();
+
+  private static final class Cached {
+    final String body;
+    final long expiresAt;
+
+    Cached(String body, long expiresAt) {
+      this.body = body;
+      this.expiresAt = expiresAt;
+    }
+  }
+
   @GetMapping(value = "/sitemap.xml")
   @ApiOperation(httpMethod = "GET", value = "Sitemap of the store's storefront pages")
   public ResponseEntity<String> sitemap(
@@ -58,11 +79,25 @@ public class SitemapApi {
           .body("Store not found");
     }
 
-    String body = render(baseUrl(), sitemapEntries.list(store));
+    String body = cachedBody(store);
     return ResponseEntity.ok()
         .contentType(XML)
         .cacheControl(CacheControl.maxAge(1, TimeUnit.HOURS).cachePublic())
         .body(body);
+  }
+
+  private String cachedBody(MerchantStore store) {
+    String key = store.getCode();
+    long now = System.currentTimeMillis();
+    Cached cached = key == null || cacheSeconds <= 0 ? null : cache.get(key);
+    if (cached != null && cached.expiresAt > now) {
+      return cached.body;
+    }
+    String body = render(baseUrl(), sitemapEntries.list(store));
+    if (key != null && cacheSeconds > 0) {
+      cache.put(key, new Cached(body, now + TimeUnit.SECONDS.toMillis(cacheSeconds)));
+    }
+    return body;
   }
 
   private String baseUrl() {
