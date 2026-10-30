@@ -279,48 +279,89 @@ public class ProductRepositoryImpl implements ProductRepositoryCustom {
 	 * so a shared slug could render another store's product, and an unknown slug failed
 	 * with "Index 0 out of bounds" (HTTP 500) instead of returning null (HTTP 404).
 	 *
-	 * The language comes from the locale built from the request language (LocaleUtils).
+	 * When the slug has no match in the request language, the store's default language is
+	 * tried, so a storefront that switches language keeps resolving the product URLs it
+	 * already shows (they carry the default-language slug).
 	 */
 	public Product getByFriendlyUrl(MerchantStore store, String seUrl, Locale locale) {
 
+		String requested = languageCode(locale);
+
 		List<String> regionList = new ArrayList<>();
 		regionList.add("*");
-		regionList.add(locale.getCountry());
+		regionList.add(locale == null ? "*" : locale.getCountry());
 
-		boolean byLanguage = !StringUtils.isBlank(locale.getLanguage());
-
+		// one query for both languages; the store's default language comes from the database
+		// because the store passed in may be detached with its language not loaded
 		StringBuilder qs = new StringBuilder();
-		qs.append("select distinct p.id from Product as p ");
+		qs.append("select p.id, pdl.code from Product as p ");
+		qs.append("join p.merchantStore m ");
 		qs.append("join p.descriptions pd ");
-		qs.append("join p.availabilities pa ");
-		qs.append("where p.merchantStore.id=:mId ");
+		qs.append("join pd.language pdl ");
+		qs.append("where m.id=:mId ");
 		qs.append("and pd.seUrl=:seUrl ");
-		if (byLanguage) {
-			qs.append("and pd.language.code=:lang ");
+		if (requested != null) {
+			qs.append("and (pdl.code=:lang or pdl.id=m.defaultLanguage.id) ");
 		}
-		qs.append("and pa.region in (:lid) ");
+		qs.append("and exists (select pa.id from ProductAvailability pa where pa.product=p and pa.region in (:lid)) ");
 		qs.append("and p.available=true and p.dateAvailable<=:dt ");
 		qs.append("order by p.id");
 
-		TypedQuery<Long> q = this.em.createQuery(qs.toString(), Long.class);
+		Query q = this.em.createQuery(qs.toString());
 		q.setParameter("mId", store.getId());
 		q.setParameter("seUrl", seUrl);
-		if (byLanguage) {
-			q.setParameter("lang", locale.getLanguage());
+		if (requested != null) {
+			q.setParameter("lang", requested);
 		}
 		q.setParameter("lid", regionList);
 		q.setParameter("dt", new Date());
 
-		List<Long> ids = q.getResultList();
-		if (ids.isEmpty()) {
+		Long inRequested = null;
+		Long inDefault = null;
+		int matches = 0;
+		for (Object row : q.getResultList()) {
+			Object[] r = (Object[]) row;
+			Long id = ((Number) r[0]).longValue();
+			matches++;
+			if (requested == null || requested.equals(r[1])) {
+				if (inRequested == null) {
+					inRequested = id;
+				}
+			} else if (inDefault == null) {
+				inDefault = id;
+			}
+		}
+		Long id = inRequested != null ? inRequested : inDefault;
+		if (id == null) {
 			return null;
 		}
-		if (ids.size() > 1) {
-			LOGGER.warn("Slug [" + seUrl + "] matches " + ids.size() + " products in store [" + store.getCode()
-					+ "], using the oldest");
+		if (matches > 1) {
+			LOGGER.debug("Slug [" + seUrl + "] has " + matches + " matches in store [" + store.getCode()
+					+ "], using product " + id);
 		}
-		return loadDetail(ids.get(0), Collections.singletonList(store.getId()));
+		return loadDetail(id, Collections.singletonList(store.getId()));
 
+	}
+
+	/**
+	 * Language code as stored in LANGUAGE.CODE. The locale comes from new Locale(code), and
+	 * Java keeps the legacy codes for three languages (he becomes iw, id becomes in, yi
+	 * becomes ji), which would never match the stored code.
+	 */
+	static String languageCode(Locale locale) {
+		if (locale == null || StringUtils.isBlank(locale.getLanguage())) {
+			return null;
+		}
+		switch (locale.getLanguage()) {
+		case "iw":
+			return "he";
+		case "in":
+			return "id";
+		case "ji":
+			return "yi";
+		default:
+			return locale.getLanguage();
+		}
 	}
 
 	@Override

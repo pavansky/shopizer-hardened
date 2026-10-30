@@ -14,8 +14,9 @@ import com.salesmanager.core.model.reference.language.Language;
 import com.salesmanager.test.common.AbstractSalesManagerCoreTestCase;
 
 /**
- * A slug is looked up within one store and one language. Two stores may use the same
- * slug, and an unknown slug returns null (the API answers 404) instead of throwing.
+ * A slug is looked up within one store, in the request language and then the store's
+ * default language. Two stores may use the same slug, and an unknown slug returns null
+ * (the API answers 404) instead of throwing.
  */
 public class ProductSlugLookupTest extends AbstractSalesManagerCoreTestCase {
 
@@ -47,8 +48,13 @@ public class ProductSlugLookupTest extends AbstractSalesManagerCoreTestCase {
 		Assert.assertEquals(b.getId(), foundB.getId());
 		Assert.assertEquals(storeB.getId(), foundB.getMerchantStore().getId());
 
-		// the English slug does not answer a French request, the French one does
-		Assert.assertNull(productService.getBySeUrl(storeA, SLUG, new Locale("fr")));
+		// a French request with the store's default-language (English) slug still finds the
+		// product, so a storefront that switches language keeps its product URLs working
+		Product fallback = productService.getBySeUrl(storeA, SLUG, new Locale("fr"));
+		Assert.assertNotNull(fallback);
+		Assert.assertEquals(a.getId(), fallback.getId());
+		// a slug in a language that is neither the requested one nor the store default does not match
+		Assert.assertNull(productService.getBySeUrl(storeA, "lien-partage", new Locale("es")));
 		Product french = productService.getBySeUrl(storeA, "lien-partage", new Locale("fr"));
 		Assert.assertNotNull(french);
 		Assert.assertEquals(a.getId(), french.getId());
