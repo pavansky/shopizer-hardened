@@ -2,8 +2,11 @@ package com.salesmanager.test.shop.integration.security;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpEntity;
@@ -114,6 +117,37 @@ class AdminLoginAndSessionIntegrationTest extends ServicesTestSupport {
 		assertEquals(HttpStatus.UNAUTHORIZED, profile(staffToken));
 		assertEquals(HttpStatus.UNAUTHORIZED,
 				login("/api/v1/private/login", "deactivate-me@test.com", "Password1").getStatusCode());
+	}
+
+	@Test
+	void adminApiIsStatelessSoNoCookieOutlivesADeactivation() {
+		ReadableUser staff = createAdmin("cookie-check@test.com", "Password1");
+		ResponseEntity<String> loggedIn = login("/api/v1/private/login", "cookie-check@test.com", "Password1");
+		assertEquals(HttpStatus.OK, loggedIn.getStatusCode());
+		assertNull(loggedIn.getHeaders().get(HttpHeaders.SET_COOKIE), loggedIn.getHeaders().toString());
+
+		HttpHeaders staffToken = bearer("cookie-check@test.com", "Password1");
+		ResponseEntity<String> withToken = testRestTemplate.exchange("/api/v1/private/category", HttpMethod.POST,
+				new HttpEntity<>(category("cookie-check-1"), staffToken), String.class);
+		assertEquals(HttpStatus.CREATED, withToken.getStatusCode(), withToken.toString());
+		List<String> cookies = withToken.getHeaders().get(HttpHeaders.SET_COOKIE);
+		assertNull(cookies, String.valueOf(cookies));
+
+		PersistableUser disable = new PersistableUser();
+		disable.setUserName("cookie-check@test.com");
+		disable.setEmailAddress("cookie-check@test.com");
+		disable.setActive(false);
+		assertEquals(HttpStatus.OK, testRestTemplate.exchange("/api/v1/private/user/" + staff.getId() + "/enabled",
+				HttpMethod.PATCH, new HttpEntity<>(disable, getHeader()), String.class).getStatusCode());
+
+		// a session cookie, if one were ever issued, must not authenticate either
+		HttpHeaders cookieOnly = new HttpHeaders();
+		cookieOnly.setContentType(MediaType.APPLICATION_JSON);
+		cookieOnly.add(HttpHeaders.COOKIE, "JSESSIONID=" + UUID.randomUUID());
+		assertEquals(HttpStatus.UNAUTHORIZED, testRestTemplate.exchange("/api/v1/private/category", HttpMethod.POST,
+				new HttpEntity<>(category("cookie-check-2"), cookieOnly), String.class).getStatusCode());
+		assertEquals(HttpStatus.UNAUTHORIZED, testRestTemplate.exchange("/api/v1/private/category", HttpMethod.POST,
+				new HttpEntity<>(category("cookie-check-3"), staffToken), String.class).getStatusCode());
 	}
 
 	@Test

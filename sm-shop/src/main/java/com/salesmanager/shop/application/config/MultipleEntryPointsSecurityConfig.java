@@ -217,11 +217,17 @@ public class MultipleEntryPointsSecurityConfig {
 			auth.authenticationProvider(new LockoutAuthenticationProvider("admin", dao, loginAttemptTracker));
 		}
 
+		/**
+		 * Stateless: credentials are checked on every request, so a deactivated
+		 * account or a changed password takes effect immediately.
+		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
 			http
 			.antMatcher("/services/**")
 			.csrf().disable()
+			.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+			.and()
 					.authorizeRequests()
 					.antMatchers("/services/public/**").permitAll()
 					// module installation and opt-in setup: administrators only
@@ -385,6 +391,10 @@ public class MultipleEntryPointsSecurityConfig {
 		 * customers hold personal data, so reading them needs the permission too.
 		 * PrivateApiAuthorizationCoverageTest fails when a new /private endpoint
 		 * has no rule here.
+		 *
+		 * The chain is stateless. With a session, the JSESSIONID cookie alone
+		 * authenticated later requests and skipped the per-request user reload,
+		 * so a deactivated admin or an old token kept working through the cookie.
 		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
@@ -394,6 +404,8 @@ public class MultipleEntryPointsSecurityConfig {
 			final String groups = API_VERSION + "/sec/private/**";
 			http
 					.requestMatchers().antMatchers(p + "/**", groups)
+					.and()
+					.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
 					.and()
 					.authorizeRequests()
 					.antMatchers(p + "/login*").permitAll()
@@ -531,11 +543,14 @@ public class MultipleEntryPointsSecurityConfig {
 			auth.authenticationProvider(new LockoutAuthenticationProvider("customer", dao, loginAttemptTracker));
 		}
 
+		/** Stateless like the admin API: the bearer token is checked on every request. */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
 			http
 			
 				.antMatcher(API_VERSION + "/auth/**")
+				.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+				.and()
 				.authorizeRequests()
 					.antMatchers(API_VERSION + "/auth/refresh").permitAll()
 					.antMatchers(API_VERSION + "/auth/login").permitAll()
