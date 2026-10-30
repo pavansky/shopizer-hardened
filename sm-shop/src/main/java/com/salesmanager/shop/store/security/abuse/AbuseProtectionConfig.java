@@ -83,8 +83,9 @@ public class AbuseProtectionConfig {
 				v + "/customer/password/reset/request", v + "/user/password/reset/request",
 				v + "/customer/*/password/*", v + "/user/*/password/*"));
 		// the current password is checked here: without a limit it is an oracle
-		rules.add(new RateLimitFilter.Rule("password-change", "PATCH", limiter(env, "password-change", 5),
-				v + "/private/user/*/password"));
+		TokenBucketLimiter passwordChange = limiter(env, "password-change", 5);
+		rules.add(new RateLimitFilter.Rule("password-change", "PATCH", passwordChange, v + "/private/user/*/password"));
+		rules.add(new RateLimitFilter.Rule("password-change", "POST", passwordChange, v + "/auth/customer/password"));
 		rules.add(rule(env, "checkout", 20, v + "/cart/*/checkout", v + "/auth/cart/*/checkout"));
 		rules.add(rule(env, "payment-init", 20, v + "/cart/*/payment/init", v + "/auth/cart/*/payment/init"));
 

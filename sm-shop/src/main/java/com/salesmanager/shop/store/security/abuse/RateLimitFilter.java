@@ -30,6 +30,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
 	static final String BODY = "{\"message\":\"Too many requests\"}";
 
+	/** Request attribute set once a rule's budget has been charged for the request. */
+	static final String CHARGED_PREFIX = RateLimitFilter.class.getName() + ".charged.";
+
 	/** A named group of endpoints sharing one limit. */
 	public static final class Rule {
 		final String name;
@@ -76,7 +79,10 @@ public class RateLimitFilter extends OncePerRequestFilter {
 	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
 			throws ServletException, IOException {
 		Rule rule = match(request);
-		if (rule != null) {
+		// a request is charged once per budget: POST /private/login carrying a
+		// Basic header is seen by the in-chain filter and by the servlet filter
+		if (rule != null && request.getAttribute(CHARGED_PREFIX + rule.name) == null) {
+			request.setAttribute(CHARGED_PREFIX + rule.name, Boolean.TRUE);
 			String client = ipResolver.resolve(request);
 			long retryAfter = rule.limiter.tryConsume(rule.name + "|" + client);
 			if (retryAfter > 0) {

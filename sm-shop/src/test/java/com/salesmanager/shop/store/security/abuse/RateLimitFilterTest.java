@@ -168,4 +168,27 @@ class RateLimitFilterTest {
 		assertEquals(200, basic(inChain, "GET", "/api/v1/private/orders", "Bearer abc").getStatus());
 		assertEquals(200, basic(inChain, "GET", "/api/v1/private/orders", null).getStatus());
 	}
+
+	@Test
+	void aLoginCarryingBasicCredentialsIsChargedOnce() throws Exception {
+		TokenBucketLimiter login = new TokenBucketLimiter(2, 60, nanos::get);
+		RateLimitFilter servlet = new RateLimitFilter(java.util.Collections.singletonList(
+				new RateLimitFilter.Rule("login", "POST", login, "/api/v*/private/login")), new ClientIpResolver(""));
+		RateLimitFilter inChain = AbuseProtectionConfig.basicAuthRateLimitFilter(login, new ClientIpResolver(""));
+
+		for (int i = 0; i < 2; i++) {
+			MockHttpServletRequest req = new MockHttpServletRequest("POST", "/api/v1/private/login");
+			req.setRemoteAddr("10.0.0.8");
+			req.addHeader("Authorization", "Basic dXNlcjE6eA==");
+			MockHttpServletResponse res = new MockHttpServletResponse();
+			// the security chain filter runs first, then the servlet filter
+			inChain.doFilter(req, res, (rq, rs) -> servlet.doFilter(rq, rs, new MockFilterChain()));
+			assertEquals(200, res.getStatus(), "request " + (i + 1));
+		}
+		MockHttpServletRequest third = new MockHttpServletRequest("POST", "/api/v1/private/login");
+		third.setRemoteAddr("10.0.0.8");
+		MockHttpServletResponse res = new MockHttpServletResponse();
+		servlet.doFilter(third, res, new MockFilterChain());
+		assertEquals(429, res.getStatus());
+	}
 }
