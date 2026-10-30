@@ -20,13 +20,17 @@ tests:
         alertname: OrdersNeedPaymentReview
         exp_alerts: []
 
-  # backups: fresh, then stale after 7 hours; never backed up (0) is stale too
+  # backups: fresh, then stale after 7 hours; never backed up (0) is stale too, but only
+  # after 30 minutes, so the first backup of a new stack has time to finish
   - interval: 1m
     input_series:
       - series: 'shopizer_backup_last_success_timestamp_seconds{instance="api:8080",job="shopizer-api"}'
         values: '0x60'
     alert_rule_test:
-      - eval_time: 30m
+      - eval_time: 20m
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 45m
         alertname: BackupStale
         exp_alerts:
           - exp_labels: { severity: page }
@@ -41,6 +45,9 @@ tests:
         alertname: BackupStale
         exp_alerts: []
       - eval_time: 7h30m
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 7h45m
         alertname: BackupStale
         exp_alerts:
           - exp_labels: { severity: page }
