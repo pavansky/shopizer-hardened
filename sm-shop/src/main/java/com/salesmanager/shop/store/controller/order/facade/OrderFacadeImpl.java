@@ -1582,8 +1582,13 @@ public class OrderFacadeImpl implements OrderFacade {
 				throw new RestApiException("400",
 						"Refund amount must be greater than 0 and at most " + remaining + ", was " + refundAmount);
 			}
+			OrderStatus before = order.getStatus();
 			Transaction refund = paymentService.processRefund(order, null, store, refundAmount);
-			boolean full = refundAmount.compareTo(remaining) == 0;
+			// processRefund decides partial or full under the order row lock and sets
+			// REFUNDED on this order only when this refund emptied the order. The
+			// remaining amount read above can be stale: with two concurrent partial
+			// refunds the second one may become the full one.
+			boolean full = before != OrderStatus.REFUNDED && order.getStatus() == OrderStatus.REFUNDED;
 			if (full) {
 				restockAfterRefund(orderId);
 			}
