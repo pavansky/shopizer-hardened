@@ -69,15 +69,21 @@ jobs:
 
       - name: Assert the demo outcome
         working-directory: shopizer-hardened
+        # the order id comes from the checkout output rather than being assumed; the
+        # script's refund section targets order 1, so the database must be new (it is:
+        # a new runner and down -v at the end)
         run: |
-          grep -q "first attempt : HTTP 200 order id 1" demo-checkout.log
-          grep -q "retry, same key: HTTP 200 order id 1" demo-checkout.log
+          order_id=$(sed -n 's/^first attempt : HTTP 200 order id \([0-9][0-9]*\).*/\1/p' demo-checkout.log)
+          test -n "$order_id"
+          echo "order id: $order_id"
+          grep -q "retry, same key: HTTP 200 order id $order_id\b" demo-checkout.log
           grep -q "same key, other cart: HTTP 409" demo-checkout.log
-          grep -q "order 1 REFUNDED" demo-checkout.log
+          grep -q "order $order_id REFUNDED" demo-checkout.log
+          echo "ORDER_ID=$order_id" >> "$GITHUB_ENV"
 
       - name: Stuck order is moved to PAYMENT_REVIEW
         working-directory: shopizer-hardened
-        run: scripts/simulate-stuck-order.sh 1
+        run: scripts/simulate-stuck-order.sh "$ORDER_ID"
 
       - name: Review gauge and alert email
         run: |
