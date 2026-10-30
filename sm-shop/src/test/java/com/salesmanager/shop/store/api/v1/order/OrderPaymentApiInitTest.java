@@ -27,18 +27,24 @@ import com.salesmanager.core.business.services.order.OrderService;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.shipping.ShippingQuoteService;
 import com.salesmanager.core.business.services.shoppingcart.ShoppingCartService;
+import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.OrderSummary;
 import com.salesmanager.core.model.order.OrderTotalSummary;
 import com.salesmanager.core.model.payments.Payment;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.reference.language.Language;
+import com.salesmanager.core.model.shipping.Quote;
 import com.salesmanager.core.model.shipping.ShippingSummary;
 import com.salesmanager.core.model.shoppingcart.ShoppingCart;
 import com.salesmanager.core.business.modules.integration.payment.impl.Stripe3Payment;
-import com.salesmanager.shop.model.order.transaction.PersistablePayment;
+import com.salesmanager.shop.model.customer.PersistableCustomer;
+import com.salesmanager.shop.model.customer.address.Address;
 import com.salesmanager.shop.model.order.transaction.ReadableTransaction;
+import com.salesmanager.shop.populator.customer.CustomerPopulator;
 import com.salesmanager.shop.store.api.exception.ConflictException;
+import com.salesmanager.shop.store.api.exception.ConversionRuntimeException;
+import com.salesmanager.shop.store.api.v1.order.OrderPaymentApi.PaymentInitRequest;
 
 class OrderPaymentApiInitTest {
 
@@ -49,6 +55,7 @@ class OrderPaymentApiInitTest {
 	private PaymentService paymentService;
 	private OrderService orderService;
 	private ShippingQuoteService shippingQuoteService;
+	private CustomerPopulator customerPopulator;
 
 	@BeforeEach
 	void setUp() throws Exception {
@@ -57,12 +64,15 @@ class OrderPaymentApiInitTest {
 		paymentService = mock(PaymentService.class);
 		orderService = mock(OrderService.class);
 		shippingQuoteService = mock(ShippingQuoteService.class);
+		customerPopulator = mock(CustomerPopulator.class);
+		ReflectionTestUtils.setField(api, "customerPopulator", customerPopulator);
 		ReflectionTestUtils.setField(api, "shoppingCartService", carts);
 		ReflectionTestUtils.setField(api, "pricingService", pricing);
 		ReflectionTestUtils.setField(api, "paymentService", paymentService);
 		ReflectionTestUtils.setField(api, "orderService", orderService);
 		ReflectionTestUtils.setField(api, "shippingQuoteService", shippingQuoteService);
 
+		cart.setId(5L);
 		cart.setShoppingCartCode("cart-1");
 		cart.setLineItems(new HashSet<>());
 		when(carts.getByCode("cart-1", store)).thenReturn(cart);
@@ -79,8 +89,8 @@ class OrderPaymentApiInitTest {
 		when(paymentService.initTransaction(isNull(), any(Payment.class), eq(store))).thenReturn(init);
 	}
 
-	private static PersistablePayment stripe3(String amount) {
-		PersistablePayment payment = new PersistablePayment();
+	private static PaymentInitRequest stripe3(String amount) {
+		PaymentInitRequest payment = new PaymentInitRequest();
 		payment.setPaymentModule("stripe3");
 		payment.setPaymentType("CREDITCARD");
 		payment.setTransactionType("INIT");
@@ -116,8 +126,15 @@ class OrderPaymentApiInitTest {
 		assertEquals(new BigDecimal("40.50"), sent.getValue().getAmount());
 	}
 
+	private void quoteOfCart(long quoteId, long cartId) {
+		Quote quote = new Quote();
+		quote.setCartId(cartId);
+		when(shippingQuoteService.getById(quoteId)).thenReturn(quote);
+	}
+
 	@Test
 	void selectedShippingQuoteIsPartOfTheTotal() throws Exception {
+		quoteOfCart(7L, 5L);
 		ShippingSummary shipping = new ShippingSummary();
 		when(shippingQuoteService.getShippingSummary(7L, store)).thenReturn(shipping);
 
@@ -129,8 +146,75 @@ class OrderPaymentApiInitTest {
 	}
 
 	@Test
-	void unknownShippingQuoteIsRejected() throws Exception {
-		assertThrows(ConflictException.class, () -> api.init(stripe3("40.50"), "cart-1", 99L, store, language));
+	void unknownShippingQuoteIsABadRequestNotAServerError() throws Exception {
+		// getById hands back a lazy reference that fails on first access
+		when(shippingQuoteService.getById(99L)).thenThrow(new javax.persistence.EntityNotFoundException("no quote 99"));
+
+		ConversionRuntimeException e = assertThrows(ConversionRuntimeException.class,
+				() -> api.init(stripe3("40.50"), "cart-1", 99L, store, language));
+
+		assertTrue(e.getErrorMessage().contains("does not exist"));
+		verify(shippingQuoteService, never()).getShippingSummary(any(), any());
+		verify(paymentService, never()).initTransaction(any(), any(Payment.class), any());
+	}
+
+	@Test
+	void quoteOfAnotherCartIsRejected() throws Exception {
+		quoteOfCart(8L, 6L);
+
+		assertThrows(ConversionRuntimeException.class, () -> api.init(stripe3("40.50"), "cart-1", 8L, store, language));
+
+		verify(shippingQuoteService, never()).getShippingSummary(any(), any());
+		verify(paymentService, never()).initTransaction(any(), any(Payment.class), any());
+	}
+
+	@Test
+	void guestTotalIsComputedWithTheGuestAddressAsCheckoutDoes() throws Exception {
+		// a store taxing by billing address: the guest's province adds tax to the total
+		Customer withAddress = new Customer();
+		when(customerPopulator.populate(any(PersistableCustomer.class), any(Customer.class), eq(store), eq(language)))
+				.thenReturn(withAddress);
+		OrderTotalSummary taxed = new OrderTotalSummary();
+		taxed.setTotal(new BigDecimal("45.77"));
+		when(orderService.caculateOrderTotal(any(OrderSummary.class), eq(withAddress), eq(store), eq(language)))
+				.thenReturn(taxed);
+		PaymentInitRequest request = stripe3("45.77");
+		PersistableCustomer guest = new PersistableCustomer();
+		Address billing = new Address();
+		billing.setCountry("CA");
+		billing.setZone("ON");
+		guest.setBilling(billing);
+		guest.setPassword("not-used-here");
+		request.setCustomer(guest);
+
+		api.init(request, "cart-1", null, store, language);
+
+		ArgumentCaptor<PersistableCustomer> converted = ArgumentCaptor.forClass(PersistableCustomer.class);
+		verify(customerPopulator).populate(converted.capture(), any(Customer.class), eq(store), eq(language));
+		assertSame(billing, converted.getValue().getBilling());
+		// only the addresses are converted: no password, nothing to persist
+		assertEquals(null, converted.getValue().getPassword());
+		ArgumentCaptor<Payment> sent = ArgumentCaptor.forClass(Payment.class);
+		verify(paymentService).initTransaction(isNull(), sent.capture(), eq(store));
+		assertEquals(new BigDecimal("45.77"), sent.getValue().getAmount());
+		verify(orderService, never()).caculateOrderTotal(any(OrderSummary.class), eq(store), eq(language));
+	}
+
+	@Test
+	void guestAmountWithoutTheTaxOfTheirAddressIsRejected() throws Exception {
+		Customer withAddress = new Customer();
+		when(customerPopulator.populate(any(PersistableCustomer.class), any(Customer.class), eq(store), eq(language)))
+				.thenReturn(withAddress);
+		OrderTotalSummary taxed = new OrderTotalSummary();
+		taxed.setTotal(new BigDecimal("45.77"));
+		when(orderService.caculateOrderTotal(any(OrderSummary.class), eq(withAddress), eq(store), eq(language)))
+				.thenReturn(taxed);
+		PaymentInitRequest request = stripe3("40.50");
+		PersistableCustomer guest = new PersistableCustomer();
+		guest.setBilling(new Address());
+		request.setCustomer(guest);
+
+		assertThrows(ConflictException.class, () -> api.init(request, "cart-1", null, store, language));
 
 		verify(paymentService, never()).initTransaction(any(), any(Payment.class), any());
 	}

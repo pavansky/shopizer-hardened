@@ -12,6 +12,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import javax.inject.Inject;
+import javax.persistence.EntityNotFoundException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.validation.Valid;
@@ -45,16 +46,20 @@ import com.salesmanager.core.model.payments.Payment;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.payments.TransactionType;
 import com.salesmanager.core.model.reference.language.Language;
+import com.salesmanager.core.model.shipping.Quote;
 import com.salesmanager.core.model.shipping.ShippingSummary;
 import com.salesmanager.core.model.shoppingcart.ShoppingCart;
 import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
 import com.salesmanager.shop.constants.Constants;
+import com.salesmanager.shop.model.customer.PersistableCustomer;
 import com.salesmanager.shop.model.order.transaction.PersistablePayment;
 import com.salesmanager.shop.model.order.transaction.ReadableTransaction;
 import com.salesmanager.shop.model.order.v0.ReadableOrderList;
+import com.salesmanager.shop.populator.customer.CustomerPopulator;
 import com.salesmanager.shop.populator.order.transaction.PersistablePaymentPopulator;
 import com.salesmanager.shop.populator.order.transaction.ReadableTransactionPopulator;
 import com.salesmanager.shop.store.api.exception.ConflictException;
+import com.salesmanager.shop.store.api.exception.ConversionRuntimeException;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.api.v1.payment.PaymentErrorResolver;
 import com.salesmanager.shop.store.controller.order.facade.OrderFacade;
@@ -99,11 +104,34 @@ public class OrderPaymentApi {
 	@Inject
 	private AuthorizationUtils authorizationUtils;
 
+	@Inject
+	private CustomerPopulator customerPopulator;
+
+	/**
+	 * Payment init body: the payment, and for a guest checkout the billing and
+	 * delivery addresses the checkout will send, so tax is computed on the same
+	 * address as the order total.
+	 */
+	public static class PaymentInitRequest extends PersistablePayment {
+
+		private static final long serialVersionUID = 1L;
+
+		private PersistableCustomer customer;
+
+		public PersistableCustomer getCustomer() {
+			return customer;
+		}
+
+		public void setCustomer(PersistableCustomer customer) {
+			this.customer = customer;
+		}
+	}
+
 	@RequestMapping(value = { "/cart/{code}/payment/init" }, method = RequestMethod.POST)
 	@ResponseBody
 	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "String", defaultValue = "DEFAULT"),
 			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
-	public ReadableTransaction init(@Valid @RequestBody PersistablePayment payment, @PathVariable String code,
+	public ReadableTransaction init(@Valid @RequestBody PaymentInitRequest payment, @PathVariable String code,
 			@RequestParam(value = "quote", required = false) Long quote,
 			@ApiIgnore MerchantStore merchantStore, @ApiIgnore Language language) throws Exception {
 
@@ -112,8 +140,29 @@ public class OrderPaymentApi {
 			throw new ResourceNotFoundException("Cart code " + code + " does not exist");
 		}
 
-		return initForCart(payment, cart, quote, null, merchantStore, language);
+		Customer taxCustomer = guestAddresses(payment.getCustomer(), merchantStore, language);
+		return initForCart(payment, cart, quote, taxCustomer, null, merchantStore, language);
 
+	}
+
+	/**
+	 * A transient customer holding only the guest's billing and delivery addresses,
+	 * converted as the guest checkout converts them, or null when none were sent
+	 * (the total is then computed without a customer address, as the cart total is).
+	 * Nothing is persisted.
+	 */
+	private Customer guestAddresses(PersistableCustomer sent, MerchantStore store, Language language) {
+		if (sent == null || (sent.getBilling() == null && sent.getDelivery() == null)) {
+			return null;
+		}
+		PersistableCustomer addresses = new PersistableCustomer();
+		addresses.setBilling(sent.getBilling());
+		addresses.setDelivery(sent.getDelivery());
+		try {
+			return customerPopulator.populate(addresses, new Customer(), store, language);
+		} catch (Exception e) {
+			throw new ConversionRuntimeException("Invalid customer address: " + e.getMessage(), e);
+		}
 	}
 
 	/**
@@ -122,12 +171,13 @@ public class OrderPaymentApi {
 	 * computed as checkout computes it; the client amount is only compared with it, so
 	 * a tampered or stale client total cannot create an intent for a different amount.
 	 * The response details carry the gateway's client data (the PaymentIntent client
-	 * secret), which is not stored.
+	 * secret), which is not stored. taxCustomer is the customer whose addresses the
+	 * total is computed with; customer is the signed-in customer, null for a guest.
 	 */
 	private ReadableTransaction initForCart(PersistablePayment payment, ShoppingCart cart, Long quote,
-			Customer customer, MerchantStore merchantStore, Language language) throws Exception {
+			Customer taxCustomer, Customer customer, MerchantStore merchantStore, Language language) throws Exception {
 
-		BigDecimal total = cartTotal(cart, quote, customer, merchantStore, language);
+		BigDecimal total = cartTotal(cart, quote, taxCustomer, merchantStore, language);
 
 		if (StringUtils.isBlank(payment.getAmount())) {
 			payment.setAmount(total.toPlainString());
@@ -166,9 +216,10 @@ public class OrderPaymentApi {
 			throws Exception {
 		OrderSummary summary = new OrderSummary();
 		if (quote != null && quote.longValue() > 0) {
+			checkQuoteOfCart(quote, cart);
 			ShippingSummary shipping = shippingQuoteService.getShippingSummary(quote, store);
 			if (shipping == null) {
-				throw new ConflictException("Shipping quote " + quote + " is not valid for this cart");
+				throw new ConversionRuntimeException("Shipping quote " + quote + " is not valid for this cart");
 			}
 			summary.setShippingSummary(shipping);
 		}
@@ -176,6 +227,30 @@ public class OrderPaymentApi {
 		OrderTotalSummary totals = customer == null ? orderService.caculateOrderTotal(summary, store, language)
 				: orderService.caculateOrderTotal(summary, customer, store, language);
 		return totals.getTotal();
+	}
+
+	/**
+	 * The quote must exist and must have been computed for this cart: quotes are
+	 * stored per cart, and another cart's quote would price a different delivery.
+	 * Unknown or foreign quotes are a bad request (400), not a server error.
+	 */
+	private void checkQuoteOfCart(Long quote, ShoppingCart cart) {
+		Quote stored;
+		Long quoteCartId;
+		try {
+			stored = shippingQuoteService.getById(quote);
+			// getById returns a lazy reference: a missing row fails here, on first access
+			quoteCartId = stored == null ? null : stored.getCartId();
+		} catch (EntityNotFoundException | org.springframework.orm.ObjectRetrievalFailureException e) {
+			stored = null;
+			quoteCartId = null;
+		}
+		if (stored == null) {
+			throw new ConversionRuntimeException("Shipping quote " + quote + " does not exist");
+		}
+		if (quoteCartId == null || cart.getId() == null || quoteCartId.longValue() != cart.getId().longValue()) {
+			throw new ConversionRuntimeException("Shipping quote " + quote + " is not valid for this cart");
+		}
 	}
 
 	@RequestMapping(value = { "/auth/cart/{code}/payment/init" }, method = RequestMethod.POST)
@@ -214,11 +289,11 @@ public class OrderPaymentApi {
 				return null;
 			}
 
-			return initForCart(payment, cart, quote, customer, merchantStore, language);
+			return initForCart(payment, cart, quote, customer, customer, merchantStore, language);
 
 		} catch (Exception e) {
 			if (e instanceof ConflictException || e instanceof ResourceNotFoundException
-					|| PaymentErrorResolver.handles(e)) {
+					|| e instanceof ConversionRuntimeException || PaymentErrorResolver.handles(e)) {
 				throw e;
 			}
 			LOGGER.error("Error while initializing the payment", e);
