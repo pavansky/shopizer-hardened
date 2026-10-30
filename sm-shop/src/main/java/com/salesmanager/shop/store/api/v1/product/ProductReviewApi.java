@@ -154,8 +154,9 @@ public class ProductReviewApi {
       HttpServletResponse response) {
 
     try {
-      // product exist
-      Product product = productService.getById(id);
+      // Only products of the requested store; another store's product id is
+      // reported as not found so its reviews are not listed here.
+      Product product = productService.findOne(id, merchantStore);
 
       if (product == null) {
         response.sendError(404, "Product id " + id + " does not exists");
@@ -203,7 +204,7 @@ public class ProductReviewApi {
 
     try {
       ProductReview prodReview = productReviewService.getById(reviewId);
-      if (prodReview == null) {
+      if (prodReview == null || productService.findOne(id, merchantStore) == null) {
         response.sendError(404, "Product review with id " + reviewId + " does not exist");
         return null;
       }
@@ -271,7 +272,10 @@ public class ProductReviewApi {
 
     try {
       ProductReview prodReview = productReviewService.getById(reviewId);
-      if (prodReview == null) {
+      // The product in the path must belong to the requested store; together
+      // with the product id check below this keeps a review of another store
+      // out of reach.
+      if (prodReview == null || productService.findOne(id, merchantStore) == null) {
         response.sendError(404, "Product review with id " + reviewId + " does not exist");
         return;
       }
