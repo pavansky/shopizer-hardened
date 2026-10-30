@@ -116,14 +116,14 @@ services:
     networks: [backend]
 
   mailpit:
-    image: axllent/mailpit:v1.27
+    image: axllent/mailpit:v1.32
     ports: [ "${MAILPIT_PORT:-8025}:8025" ]
     restart: unless-stopped
     logging: *logging
     networks: [backend]
 
   alertmanager:
-    image: prom/alertmanager:v0.28.1
+    image: prom/alertmanager:v0.34.1
     command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
     volumes:
       - "./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"
@@ -135,7 +135,7 @@ services:
     networks: [backend]
 
   prometheus:
-    image: prom/prometheus:v3.5.0
+    image: prom/prometheus:v3.15.1
     volumes:
       - "./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
       - "./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro"
@@ -147,7 +147,7 @@ services:
     networks: [backend]
 
   grafana:
-    image: grafana/grafana:12.1.0
+    image: grafana/grafana:12.4.14
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in deploy/.env}
       GF_AUTH_ANONYMOUS_ENABLED: "true"
