@@ -1,0 +1,62 @@
+# Unit tests for alerts.yml:
+#   docker run --rm -v "$PWD/deploy/prometheus":/p -w /p --entrypoint promtool prom/prometheus:v3.5.0 test rules alerts.test.yml
+rule_files: [ alerts.yml ]
+evaluation_interval: 1m
+tests:
+  # an order sits in review for 3 hours, then is resolved: the alert stays on the whole time
+  - interval: 1m
+    input_series:
+      - series: 'shopizer_orders_payment_review{store="DEFAULT",instance="api:8080",job="shopizer-api"}'
+        values: '0 1x180 0x10'
+      - series: 'shopizer_orders_payment_review{store="B2B",instance="api:8080",job="shopizer-api"}'
+        values: '0x190'
+    alert_rule_test:
+      - eval_time: 150m
+        alertname: OrdersNeedPaymentReview
+        exp_alerts:
+          - exp_labels: { severity: page, store: DEFAULT }
+            exp_annotations: { summary: "1 order(s) of store DEFAULT in PAYMENT_REVIEW: a person must check the gateway" }
+      - eval_time: 185m
+        alertname: OrdersNeedPaymentReview
+        exp_alerts: []
+
+  # backups: fresh, then stale after 7 hours; never backed up (0) is stale too, but only
+  # after 30 minutes, so the first backup of a new stack has time to finish
+  - interval: 1m
+    input_series:
+      - series: 'shopizer_backup_last_success_timestamp_seconds{instance="api:8080",job="shopizer-api"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations: { summary: "No database backup has passed its checks for more than 7 hours: see the backup service logs" }
+  - interval: 1m
+    input_series:
+      # the test clock starts at epoch 0: a good backup at t=10m
+      - series: 'shopizer_backup_last_success_timestamp_seconds{instance="api:8080",job="shopizer-api"}'
+        values: '600x500'
+    alert_rule_test:
+      - eval_time: 6h
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 7h30m
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 7h45m
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations: { summary: "No database backup has passed its checks for more than 7 hours: see the backup service logs" }
+
+  - interval: 1m
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels: { severity: none }
+            exp_annotations: { summary: "Alerting pipeline heartbeat: this alert always fires" }

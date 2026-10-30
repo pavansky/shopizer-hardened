@@ -1,0 +1,147 @@
+# Whole-stack end-to-end run: builds the API, admin and storefront images, starts the
+# compose stack, then drives it the way the demo does: scripted checkout and refunds, a
+# stuck order the reconciler must move to PAYMENT_REVIEW, the alert email that follows,
+# a backup restore drill and the storefront browser specs.
+name: e2e
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prometheus config and alert rule unit tests
+        run: |
+          docker run --rm -v "$PWD/deploy/prometheus":/etc/prometheus --entrypoint promtool prom/prometheus:v3.5.0 check config /etc/prometheus/prometheus.yml
+          docker run --rm -v "$PWD/deploy/prometheus":/p -w /p --entrypoint promtool prom/prometheus:v3.5.0 test rules alerts.test.yml
+      - name: Alertmanager config
+        run: docker run --rm -v "$PWD/deploy/alertmanager":/cfg --entrypoint amtool prom/alertmanager:v0.28.1 check-config /cfg/alertmanager.yml
+      - name: Compose file
+        run: docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config -q
+      - name: Shell syntax
+        run: for f in deploy/backup/*.sh scripts/*.sh; do bash -n "$f"; done
+
+  stack:
+    needs: deploy-config
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COMPOSE: docker compose --env-file deploy/.env -f deploy/docker-compose.yml
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: shopizer-hardened }
+      # the compose file builds ../../shopizer-admin-hardened and ../../shopizer-shop-hardened
+      # relative to deploy/. If these repositories are private, add a read-only token as the
+      # E2E_REPO_TOKEN secret.
+      - uses: actions/checkout@v4
+        with:
+          repository: pavansky/shopizer-admin-hardened
+          ref: main
+          path: shopizer-admin-hardened
+          token: ${{ secrets.E2E_REPO_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: pavansky/shopizer-shop-hardened
+          ref: main
+          path: shopizer-shop-hardened
+          token: ${{ secrets.E2E_REPO_TOKEN || github.token }}
+
+      - name: Configure the stack
+        working-directory: shopizer-hardened
+        run: cp deploy/.env.example deploy/.env
+
+      - name: Build and start
+        working-directory: shopizer-hardened
+        run: $COMPOSE up -d --build --wait --wait-timeout 900
+
+      - name: Scripted checkout, idempotency and refunds
+        working-directory: shopizer-hardened
+        run: scripts/demo-checkout.sh http://localhost:8080 | tee demo-checkout.log
+
+      - name: Assert the demo outcome
+        working-directory: shopizer-hardened
+        # the order id comes from the checkout output rather than being assumed; the
+        # script's refund section targets order 1, so the database must be new (it is:
+        # a new runner and down -v at the end)
+        run: |
+          order_id=$(sed -n 's/^first attempt : HTTP 200 order id \([0-9][0-9]*\).*/\1/p' demo-checkout.log)
+          test -n "$order_id"
+          echo "order id: $order_id"
+          grep -q "retry, same key: HTTP 200 order id $order_id\b" demo-checkout.log
+          grep -q "same key, other cart: HTTP 409" demo-checkout.log
+          grep -q "order $order_id REFUNDED" demo-checkout.log
+          echo "ORDER_ID=$order_id" >> "$GITHUB_ENV"
+
+      - name: Stuck order is moved to PAYMENT_REVIEW
+        working-directory: shopizer-hardened
+        run: scripts/simulate-stuck-order.sh "$ORDER_ID"
+
+      - name: Review gauge and alert email
+        run: |
+          # Prometheus API on the host: the API's own /actuator/prometheus only answers its network
+          q() { curl -s --get localhost:9090/api/v1/query --data-urlencode "query=$1" \
+                | python3 -c 'import sys,json; r=json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "")'; }
+          mails() { curl -s --get localhost:8025/api/v1/search --data-urlencode "query=subject:$1" \
+                | python3 -c 'import sys,json; print(json.load(sys.stdin)["messages_count"])'; }
+          for i in $(seq 1 60); do
+            review=$(q 'max(shopizer_orders_payment_review{store="DEFAULT"})')
+            [ "${review:-0}" != "0" ] && [ "$(mails OrdersNeedPaymentReview)" -gt 0 ] && [ "$(mails Watchdog)" -gt 0 ] && break
+            sleep 5
+          done
+          echo "orders in review: $review"
+          echo "alert emails: review=$(mails OrdersNeedPaymentReview) watchdog=$(mails Watchdog)"
+          [ "${review:-0}" != "0" ] && [ "$(mails OrdersNeedPaymentReview)" -gt 0 ] && [ "$(mails Watchdog)" -gt 0 ]
+          echo "payment outcomes: $(q 'sum(shopizer_payment_outcomes_total{outcome="success"})')"
+          age=$(q 'time() - max(shopizer_backup_last_success_timestamp_seconds)')
+          echo "backup age: ${age}s"
+          python3 -c "import sys; sys.exit(0 if 0 <= float('${age:-1e9}') < 3600 else 1)"
+
+      - name: Backup restore drill
+        working-directory: shopizer-hardened
+        run: deploy/backup/restore-drill.sh --fresh
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - name: Storefront browser specs
+        working-directory: shopizer-shop-hardened/tests/e2e
+        env:
+          BASE_URL: http://localhost:3000
+          CI: "true"
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - name: Collect logs
+        if: failure()
+        working-directory: shopizer-hardened
+        run: |
+          mkdir -p ../e2e-logs
+          $COMPOSE ps -a > ../e2e-logs/ps.txt
+          for s in $($COMPOSE config --services); do $COMPOSE logs --no-color "$s" > "../e2e-logs/$s.log" 2>&1 || true; done
+          cp demo-checkout.log ../e2e-logs/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-logs
+          path: |
+            e2e-logs
+            shopizer-shop-hardened/tests/e2e/playwright-report
+            shopizer-shop-hardened/tests/e2e/test-results
+          retention-days: 7
+
+      - name: Stop the stack
+        if: always()
+        working-directory: shopizer-hardened
+        run: $COMPOSE down -v

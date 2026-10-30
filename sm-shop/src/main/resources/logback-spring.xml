@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Console logging in one of two formats, chosen by LOG_FORMAT:
+    LOG_FORMAT=json  one JSON object per line (logstash-logback-encoder), with the MDC
+                     fields such as requestId as top-level keys; the compose stack sets it
+    anything else    the usual Spring Boot pattern, with the request id after the level
+  Levels still come from logging.level.* in application.properties.
+-->
+<configuration>
+  <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+  <define name="LOG_APPENDER" class="com.salesmanager.shop.observability.LogFormatDefiner"/>
+
+  <appender name="text" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%5p) %clr([%X{requestId:-}]){faint} %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n%wEx</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <appender name="json" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <includeContext>false</includeContext>
+      <customFields>{"service":"shopizer-api"}</customFields>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="${LOG_APPENDER}"/>
+  </root>
+</configuration>

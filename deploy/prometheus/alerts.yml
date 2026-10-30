@@ -1,10 +1,20 @@
 groups:
+  - name: shopizer-pipeline
+    rules:
+      # Always firing. Its email arriving every few hours proves Prometheus, Alertmanager
+      # and mail delivery all work; when it stops arriving, the alerting pipeline is broken.
+      - alert: Watchdog
+        expr: vector(1)
+        labels: { severity: none }
+        annotations: { summary: "Alerting pipeline heartbeat: this alert always fires" }
+
   - name: shopizer-payments
     rules:
+      # A state, not a transition: fires while any order of the store is still in review.
       - alert: OrdersNeedPaymentReview
-        expr: increase(shopizer_reconciliation_orders_total{outcome="review"}[1h]) > 0
+        expr: max by (store) (shopizer_orders_payment_review) > 0
         labels: { severity: page }
-        annotations: { summary: "Orders moved to PAYMENT_REVIEW: a person must check the gateway" }
+        annotations: { summary: "{{ $value }} order(s) of store {{ $labels.store }} in PAYMENT_REVIEW: a person must check the gateway" }
       - alert: LateChargeNotCompensated
         expr: increase(shopizer_reconciliation_orders_total{outcome="compensation_needed"}[1h]) > 0
         labels: { severity: page }
@@ -22,3 +32,15 @@ groups:
         for: 2m
         labels: { severity: page }
         annotations: { summary: "Prometheus cannot scrape the API" }
+
+  - name: shopizer-backups
+    rules:
+      # 0 means no good backup yet (or no status file); the interval is 6 hours.
+      # "for" lets a new stack take its first backup before this pages.
+      - alert: BackupStale
+        expr: time() - max(shopizer_backup_last_success_timestamp_seconds) > 7 * 3600 or max(shopizer_backup_last_success_timestamp_seconds) == 0
+        # 30m: on a new stack the first backup waits for the API to create the schema, which
+        # took about 16 minutes on a slow host; a 10m wait paged during every fresh start
+        for: 30m
+        labels: { severity: page }
+        annotations: { summary: "No database backup has passed its checks for more than 7 hours: see the backup service logs" }

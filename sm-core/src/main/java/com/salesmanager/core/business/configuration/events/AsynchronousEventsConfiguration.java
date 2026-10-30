@@ -9,6 +9,8 @@ import org.springframework.context.event.ApplicationEventMulticaster;
 import org.springframework.context.event.SimpleApplicationEventMulticaster;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import com.salesmanager.core.business.configuration.logging.MdcTaskDecorator;
+
 /**
  * Events will be asynchronous (in a different thread)
  * @author carlsamson
@@ -59,6 +61,8 @@ public class AsynchronousEventsConfiguration {
 		// let in-flight listeners (e.g. order confirmation emails) finish on shutdown
 		executor.setWaitForTasksToCompleteOnShutdown(true);
 		executor.setAwaitTerminationSeconds(awaitSeconds);
+		// listeners log with the request id of the request that published the event
+		executor.setTaskDecorator(new MdcTaskDecorator());
 		// initialization is left to Spring (ThreadPoolTaskExecutor is an InitializingBean)
 		return executor;
 	}
