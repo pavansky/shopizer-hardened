@@ -2,8 +2,11 @@ package com.salesmanager.core.business.services.order;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -13,6 +16,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -92,7 +96,6 @@ class OrderTotalTaxGoldenTest {
 		rates.add(rate("RED", "5", reduced));
 
 		when(shippingService.getShippingConfiguration(store)).thenReturn(shippingConfiguration);
-		when(taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS)).thenReturn(standard);
 		when(taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store)).thenReturn(standard);
 		when(taxRateService.listByCountryZoneAndTaxClass(any(), any(), any(), eq(store), any())).thenAnswer(inv -> {
 			TaxClass taxClass = inv.getArgument(2);
@@ -138,6 +141,11 @@ class OrderTotalTaxGoldenTest {
 
 		assertEquals(new BigDecimal("144.00"), totals.getSubTotal());
 		assertEquals(new BigDecimal("155.70"), totals.getTotal());
+	}
+
+	@AfterEach
+	void neverUsesTheUnscopedTaxClassLookup() throws Exception {
+		verify(taxClassService, never()).getByCode(anyString());
 	}
 
 	private void coupon(String... perLine) throws Exception {

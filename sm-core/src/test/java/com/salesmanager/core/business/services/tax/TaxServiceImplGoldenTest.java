@@ -2,8 +2,11 @@ package com.salesmanager.core.business.services.tax;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -15,6 +18,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -74,7 +78,6 @@ class TaxServiceImplGoldenTest {
 		store.setCountry(canada);
 		store.setZone(quebec);
 
-		when(taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS)).thenReturn(standard);
 		when(taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store)).thenReturn(standard);
 		when(shippingService.getShippingConfiguration(store)).thenReturn(shippingConfiguration);
 		when(taxRateService.listByCountryZoneAndTaxClass(any(), any(), any(), eq(store), any())).thenAnswer(inv -> {
@@ -224,9 +227,10 @@ class TaxServiceImplGoldenTest {
 	}
 
 	@Test
-	void storeWithoutADefaultClassOnlyTaxesClassifiedLines() throws Exception {
+	void storeWithoutADefaultClassAndSeveralClassesOnlyTaxesClassifiedLines() throws Exception {
 		rates.add(rate("RED", "5", quebec, reduced, false));
 		when(taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store)).thenReturn(null);
+		when(taxClassService.listByStore(store)).thenReturn(Arrays.asList(reduced, taxClass(3L, "LUXURY")));
 
 		Map<String, BigDecimal> taxes = taxes(
 				summary(line("100.00", 1, null), line("30.00", 2, reduced)), customer(quebec, quebec));
@@ -235,9 +239,27 @@ class TaxServiceImplGoldenTest {
 	}
 
 	@Test
+	void storeWithoutADefaultClassUsesItsOnlyTaxClassForUnclassifiedLines() throws Exception {
+		// a store created through the API has no DEFAULT class
+		rates.add(rate("VAT", "5", quebec, reduced, false));
+		when(taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store)).thenReturn(null);
+		when(taxClassService.listByStore(store)).thenReturn(Arrays.asList(reduced));
+
+		Map<String, BigDecimal> taxes = taxes(
+				summary(line("100.00", 1, null), line("30.00", 2, reduced)), customer(quebec, quebec));
+
+		assertEquals(single("VAT", "8.00"), taxes);
+	}
+
+	@Test
 	void noCustomerMeansNoTax() throws Exception {
 		rates.add(rate("STD", "10", quebec, standard, false));
 		assertEquals(null, service.calculateTax(summary(line("100.00", 1, null)), null, store, english));
+	}
+
+	@AfterEach
+	void neverUsesTheUnscopedTaxClassLookup() throws Exception {
+		verify(taxClassService, never()).getByCode(anyString());
 	}
 
 	// ---- helpers ----
