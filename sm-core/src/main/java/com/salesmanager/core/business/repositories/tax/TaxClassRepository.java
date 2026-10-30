@@ -12,6 +12,11 @@ public interface TaxClassRepository extends JpaRepository<TaxClass, Long> {
 	@Query("select t from TaxClass t left join fetch t.merchantStore tm where tm.id=?1")
 	List<TaxClass> findByStore(Integer id);
 	
+	/**
+	 * Not store scoped: TAX_CLASS_CODE is unique per store only, so this fails
+	 * as soon as two stores have the same code. Use findByStoreAndCode.
+	 */
+	@Deprecated
 	@Query("select t from TaxClass t left join fetch t.merchantStore tm where t.code=?1")
 	TaxClass findByCode(String code);
 	

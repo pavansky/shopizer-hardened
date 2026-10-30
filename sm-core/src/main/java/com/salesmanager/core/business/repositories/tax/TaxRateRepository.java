@@ -24,11 +24,21 @@ public interface TaxRateRepository extends JpaRepository<TaxRate, Long> {
 	@Query("select t from TaxRate t join fetch t.taxClass join fetch t.merchantStore tm join fetch t.country left join fetch t.zone left join fetch t.descriptions td left join t.parent where t.id=?1")
 	TaxRate findOne(Long id);
 	
-	@Query("select t from TaxRate t join fetch t.taxClass join fetch t.merchantStore tm join fetch t.country tc left join fetch t.zone tz left join fetch t.descriptions td left join t.parent where tm.id=?1 AND (tz.id=?2 OR tz IS NULL) and tc.id=?3 and td.language.id=?4 order by t.taxPriority asc")
-	List<TaxRate> findByMerchantAndZoneAndCountryAndLanguage(Integer id, Long zoneId, Integer countryId, Integer languageId);
+	/**
+	 * Rates of one tax class that apply to a country and zone (rates without a
+	 * zone apply to the whole country), by ascending priority. Descriptions are
+	 * fetched in every language so a rate still applies when it has no
+	 * description in the shopper's language.
+	 */
+	@Query("select distinct t from TaxRate t join fetch t.taxClass tcl join fetch t.merchantStore tm join fetch t.country tc left join fetch t.zone tz left join fetch t.descriptions td where tm.id=?1 AND (tz.id=?2 OR tz IS NULL) and tc.id=?3 and tcl.id=?4 order by t.taxPriority asc")
+	List<TaxRate> findByMerchantAndZoneAndCountryAndTaxClass(Integer id, Long zoneId, Integer countryId, Long taxClassId);
 	
-	@Query("select t from TaxRate t join fetch t.taxClass join fetch t.merchantStore tm join fetch t.country tc left join fetch t.zone tz left join fetch t.descriptions td left join t.parent where tm.id=?1 AND t.stateProvince=?2 and tc.id=?3 and td.language.id=?4 order by t.taxPriority asc")
-	List<TaxRate> findByMerchantAndProvinceAndCountryAndLanguage(Integer id, String province, Integer countryId, Integer languageId);
+	/**
+	 * Same as findByMerchantAndZoneAndCountryAndTaxClass for a free text state
+	 * or province (countries without zones).
+	 */
+	@Query("select distinct t from TaxRate t join fetch t.taxClass tcl join fetch t.merchantStore tm join fetch t.country tc left join fetch t.zone tz left join fetch t.descriptions td where tm.id=?1 AND t.stateProvince=?2 and tc.id=?3 and tcl.id=?4 order by t.taxPriority asc")
+	List<TaxRate> findByMerchantAndProvinceAndCountryAndTaxClass(Integer id, String province, Integer countryId, Long taxClassId);
 	
 	
 }
