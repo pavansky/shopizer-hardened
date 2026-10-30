@@ -9,6 +9,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.builders.WebSecurity;
@@ -21,16 +22,28 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.www.BasicAuthenticationEntryPoint;
+import org.springframework.security.web.access.ExceptionTranslationFilter;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 
+import com.salesmanager.core.business.repositories.system.AdminAuditEventRepository;
 import com.salesmanager.shop.admin.security.UserAuthenticationSuccessHandler;
 import com.salesmanager.shop.admin.security.WebUserServices;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.security.AuthenticationTokenFilter;
+import com.salesmanager.shop.store.security.JWTTokenUtil;
 import com.salesmanager.shop.store.security.ServicesAuthenticationSuccessHandler;
+import com.salesmanager.shop.store.security.abuse.AbuseProtectionConfig;
+import com.salesmanager.shop.store.security.abuse.ClientIpResolver;
+import com.salesmanager.shop.store.security.abuse.LockoutAuthenticationProvider;
+import com.salesmanager.shop.store.security.abuse.PasswordFirstDaoAuthenticationProvider;
+import com.salesmanager.shop.store.security.abuse.LoginAttemptTracker;
+import com.salesmanager.shop.store.security.abuse.RateLimitFilter;
+import com.salesmanager.shop.store.security.abuse.TokenBucketLimiter;
+import com.salesmanager.shop.store.security.admin.AdminSelfAccess;
+import com.salesmanager.shop.store.security.admin.AdminTokenRefreshGuard;
 import com.salesmanager.shop.store.security.admin.JWTAdminAuthenticationProvider;
+import com.salesmanager.shop.store.security.audit.AdminAuditFilter;
 import com.salesmanager.shop.store.security.admin.JWTAdminServicesImpl;
-import com.salesmanager.shop.store.security.customer.JWTCustomerAuthenticationProvider;
 import com.salesmanager.shop.store.security.services.CredentialsService;
 import com.salesmanager.shop.store.security.services.CredentialsServiceImpl;
 
@@ -86,6 +99,25 @@ public class MultipleEntryPointsSecurityConfig {
 		return new com.salesmanager.shop.store.controller.customer.facade.CustomerFacadeImpl();
 	}
 
+	/** {@code @selfUser.isSelf(authentication, #id)} in the admin URL rules. */
+	@Bean("selfUser")
+	public AdminSelfAccess selfUser() {
+		return new AdminSelfAccess();
+	}
+
+	/**
+	 * HTTP Basic credentials are checked by BasicAuthenticationFilter inside the
+	 * security chain, before the servlet-level rate limit filter runs. Chains that
+	 * accept Basic call this to apply the login budget in front of that filter.
+	 */
+	static void limitBasicAuthentication(HttpSecurity http, org.springframework.core.env.Environment env,
+			TokenBucketLimiter loginRateLimiter, ClientIpResolver clientIpResolver) {
+		if (env.getProperty("shopizer.ratelimit.enabled", Boolean.class, Boolean.TRUE)) {
+			RateLimitFilter filter = AbuseProtectionConfig.basicAuthRateLimitFilter(loginRateLimiter, clientIpResolver);
+			http.addFilterBefore(filter, BasicAuthenticationFilter.class);
+		}
+	}
+
 	
 	
 	/**
@@ -106,6 +138,15 @@ public class MultipleEntryPointsSecurityConfig {
 
 		@Autowired
 		private UserDetailsService customerDetailsService;
+
+		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
+		@Autowired
+		private ClientIpResolver clientIpResolver;
 
 		public CustomerConfigurationAdapter() {
 			super();
@@ -128,6 +169,7 @@ public class MultipleEntryPointsSecurityConfig {
 
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
 			http
 			.antMatcher("/shop/**")
 			.csrf().disable()			
@@ -187,19 +229,53 @@ public class MultipleEntryPointsSecurityConfig {
 			super();
 		}
 
+		@Autowired
+		private PasswordEncoder passwordEncoder;
+
+		@Autowired
+		private LoginAttemptTracker loginAttemptTracker;
+
+		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
+		@Autowired
+		private ClientIpResolver clientIpResolver;
+
+		@Autowired
+		private AdminAuditEventRepository adminAuditEventRepository;
+
+		/** HTTP Basic with admin credentials, behind the same lockout as the admin login. */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-			auth.userDetailsService(userDetailsService);
+			DaoAuthenticationProvider dao = new PasswordFirstDaoAuthenticationProvider(userDetailsService,
+					passwordEncoder);
+			dao.afterPropertiesSet();
+			auth.authenticationProvider(
+					new LockoutAuthenticationProvider("admin", dao, loginAttemptTracker, clientIpResolver));
 		}
 
+		/**
+		 * Stateless: credentials are checked on every request, so a deactivated
+		 * account or a changed password takes effect immediately. Mutating
+		 * requests are written to ADMIN_AUDIT like on the admin API.
+		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
 			http
 			.antMatcher("/services/**")
 			.csrf().disable()
+			.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+			.and()
+			.addFilterBefore(new AdminAuditFilter(adminAuditEventRepository, clientIpResolver),
+					ExceptionTranslationFilter.class)
 					.authorizeRequests()
 					.antMatchers("/services/public/**").permitAll()
-					.antMatchers("/services/private/**").hasRole("AUTH")
+					// module installation and opt-in setup: administrators only
+					.antMatchers("/services/private/**").hasAnyRole("ADMIN", "SUPERADMIN")
 					.anyRequest().authenticated()
 					.and().httpBasic().authenticationEntryPoint(servicesAuthenticationEntryPoint())
 					.and().formLogin()
@@ -319,11 +395,31 @@ public class MultipleEntryPointsSecurityConfig {
 			super();
 		}
 
+		@Autowired
+		private LoginAttemptTracker loginAttemptTracker;
+
+		@Autowired
+		private AdminAuditEventRepository adminAuditEventRepository;
+
+		@Autowired
+		private ClientIpResolver clientIpResolver;
+
+		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
+		/**
+		 * Admin login (POST /private/login and HTTP Basic on this chain) goes
+		 * through one provider only: JWTAdminAuthenticationProvider behind the
+		 * per-account lockout. A second DAO provider used to run as well; it
+		 * answered disabled accounts with a different error than wrong passwords.
+		 */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-		       auth.userDetailsService(jwtUserDetailsService)
-	            .and()
-	            .authenticationProvider(authenticationProvider());
+			auth.authenticationProvider(new LockoutAuthenticationProvider("admin", adminAuthenticationProvider(),
+					loginAttemptTracker, clientIpResolver));
 		}
 		
 		@Override
@@ -333,28 +429,115 @@ public class MultipleEntryPointsSecurityConfig {
 
 		
 		/**
-		 * Admin user api
+		 * Admin user api.
+		 *
+		 * Every /private endpoint is matched by a rule naming the permission it
+		 * needs; anything not listed is denied. The permissions are the group
+		 * permissions already loaded as authorities by JWTAdminServicesImpl:
+		 * SUPERADMIN, ADMIN (both also hold every functional permission), and
+		 * PRODUCTS, ORDER, CONTENT, STORE, TAX, PAYMENT, CUSTOMER, SHIPPING.
+		 * Reading catalog, content, tax, shipping and store data is open to any
+		 * staff member; changing it needs the functional permission. Orders and
+		 * customers hold personal data, so reading them needs the permission too.
+		 * PrivateApiAuthorizationCoverageTest fails when a new /private endpoint
+		 * has no rule here.
+		 *
+		 * The chain is stateless. With a session, the JSESSIONID cookie alone
+		 * authenticated later requests and skipped the per-request user reload,
+		 * so a deactivated admin or an old token kept working through the cookie.
 		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
+			final String p = API_VERSION + "/private";
+			final String staff = "hasRole('AUTH')";
+			final String admin = "hasAnyAuthority('ADMIN','SUPERADMIN')";
+			final String groups = API_VERSION + "/sec/private/**";
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
 			http
-					.antMatcher(API_VERSION + "/private/**")
+					.requestMatchers().antMatchers(p + "/**", groups)
+					.and()
+					.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+					.and()
 					.authorizeRequests()
-					.antMatchers(API_VERSION + "/private/login*").permitAll()
-					.antMatchers(API_VERSION + "/private/refresh").permitAll()
-					.antMatchers(HttpMethod.OPTIONS, API_VERSION + "/private/**").permitAll()
-					.antMatchers(API_VERSION + "/private/**").hasRole("AUTH")
-					.anyRequest().authenticated()
+					.antMatchers(p + "/login*").permitAll()
+					.antMatchers(p + "/refresh").permitAll()
+					.antMatchers(HttpMethod.OPTIONS, p + "/**").permitAll()
+
+					// self service: own profile, own password (the current password is checked).
+					// Only a superadmin may change someone else's password: otherwise any
+					// staff member could guess the current password of a stronger account.
+					.antMatchers(HttpMethod.GET, p + "/user/profile").access(staff)
+					.antMatchers(HttpMethod.PATCH, p + "/user/{id}/password")
+							.access("@selfUser.isSelf(authentication, #id) or hasAuthority('SUPERADMIN')")
+
+					// staff accounts, groups and permissions
+					.antMatchers(p + "/user/**", p + "/users/**").access(admin)
+					// groups and permissions (SecurityApi, mapped under /api/v1/sec/private)
+					.antMatchers(HttpMethod.GET, groups).access(admin)
+
+					// payment gateway configuration, system and marketing settings
+					.antMatchers(p + "/modules/payment/**", p + "/configurations/payment").access(admin)
+					.antMatchers(p + "/system/**", p + "/optin").access(admin)
+
+					// store settings
+					.antMatchers(HttpMethod.GET, p + "/store/**", p + "/stores/**", p + "/merchant/**",
+							p + "/marketplace/**").access(staff)
+					.antMatchers(p + "/store/**", p + "/stores/**", p + "/merchant/**").access(admin)
+
+					// orders, payments, refunds and order history
+					.antMatchers(p + "/orders/**").access(permission("ORDER"))
+
+					// customers and their reviews
+					.antMatchers(p + "/customer/**", p + "/customers/**").access(permission("CUSTOMER"))
+
+					// catalog
+					.antMatchers(HttpMethod.GET, catalog(p)).access(staff)
+					.antMatchers(catalog(p)).access(permission("PRODUCTS"))
+
+					// content pages, boxes, images and files
+					.antMatchers(HttpMethod.GET, p + "/content/**", p + "/contents/**").access(staff)
+					.antMatchers(p + "/content/**", p + "/contents/**", p + "/file", p + "/files").access(permission("CONTENT"))
+
+					// tax
+					.antMatchers(HttpMethod.GET, p + "/tax/**").access(staff)
+					.antMatchers(p + "/tax/**").access(permission("TAX"))
+
+					// shipping: module settings can hold carrier credentials
+					.antMatchers(p + "/modules/shipping/**", p + "/configurations/shipping").access(permission("SHIPPING"))
+					.antMatchers(HttpMethod.GET, p + "/shipping/**").access(staff)
+					.antMatchers(p + "/shipping/**").access(permission("SHIPPING"))
+
+					// deny by default
+					.antMatchers(p + "/**").denyAll()
+					.anyRequest().denyAll()
 					.and()
 					.httpBasic().authenticationEntryPoint(apiAdminAuthenticationEntryPoint())
 					.and()
 					.addFilterAfter(authenticationTokenFilter, BasicAuthenticationFilter.class)
+					// after the token is resolved, before access is decided: denied requests are audited too
+					.addFilterBefore(new AdminAuditFilter(adminAuditEventRepository, clientIpResolver),
+							ExceptionTranslationFilter.class)
 					.csrf().disable();
 
 		}
 		
+		/** The functional permission, or ADMIN / SUPERADMIN. */
+		static String permission(String name) {
+			return "hasAnyAuthority('" + name + "','ADMIN','SUPERADMIN')";
+		}
+
+		static String[] catalog(String p) {
+			return new String[] { p + "/product/**", p + "/products/**", p + "/category/**", p + "/catalog/**",
+					p + "/catalogs", p + "/manufacturer/**", p + "/manufacturers" };
+		}
+
+		/**
+		 * Named for the admin chain only. It used to share the bean name
+		 * authenticationProvider with a customer provider, and bean overriding
+		 * decided which one admin login used.
+		 */
 	    @Bean
-	    public AuthenticationProvider authenticationProvider() {
+	    public AuthenticationProvider adminAuthenticationProvider() {
 	    	JWTAdminAuthenticationProvider provider = new JWTAdminAuthenticationProvider();
 	        provider.setUserDetailsService(jwtUserDetailsService);
 	        return provider;
@@ -397,16 +580,60 @@ public class MultipleEntryPointsSecurityConfig {
 			return super.authenticationManagerBean();
 		}
 
+		@Autowired
+		private PasswordEncoder passwordEncoder;
+
+		@Autowired
+		private LoginAttemptTracker loginAttemptTracker;
+
+		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
+		@Autowired
+		private ClientIpResolver clientIpResolver;
+
+		@Autowired
+		private JWTTokenUtil jwtTokenUtil;
+
+		@Autowired
+		private JWTAdminServicesImpl jwtAdminDetailsService;
+
+		@org.springframework.beans.factory.annotation.Value("${authToken.header}")
+		private String tokenHeader;
+
+		/**
+		 * Customer login: the DAO provider (unknown users and wrong passwords both
+		 * fail as bad credentials; the password is hashed before the account status
+		 * is checked) behind the login lockout.
+		 */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-			auth.userDetailsService(jwtCustomerDetailsService);
+			DaoAuthenticationProvider dao = new PasswordFirstDaoAuthenticationProvider(jwtCustomerDetailsService,
+					passwordEncoder);
+			dao.afterPropertiesSet();
+			auth.authenticationProvider(
+					new LockoutAuthenticationProvider("customer", dao, loginAttemptTracker, clientIpResolver));
 		}
 
+		/**
+		 * Stateless like the admin API: the bearer token is checked on every request.
+		 * The admin token refresh (/auth/refresh) is mapped on this chain; the guard
+		 * refuses tokens the admin API would no longer accept.
+		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
+			// after the token filter, which sets the CORS headers the admin UI needs to read the 401
+			http.addFilterBefore(new AdminTokenRefreshGuard(jwtTokenUtil, jwtAdminDetailsService, tokenHeader),
+					ExceptionTranslationFilter.class);
 			http
 			
 				.antMatcher(API_VERSION + "/auth/**")
+				.sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+				.and()
 				.authorizeRequests()
 					.antMatchers(API_VERSION + "/auth/refresh").permitAll()
 					.antMatchers(API_VERSION + "/auth/login").permitAll()
@@ -421,13 +648,6 @@ public class MultipleEntryPointsSecurityConfig {
 
 		}
 		
-	    @Bean
-	    public AuthenticationProvider authenticationProvider() {
-	    	JWTCustomerAuthenticationProvider provider = new JWTCustomerAuthenticationProvider();
-	        provider.setUserDetailsService(jwtCustomerDetailsService);
-	        return provider;
-	    }
-
 		@Bean
 		public AuthenticationEntryPoint apiCustomerAuthenticationEntryPoint() {
 			BasicAuthenticationEntryPoint entryPoint = new BasicAuthenticationEntryPoint();

@@ -146,6 +146,13 @@
 			<version>1.6.7</version>
 		</dependency>
 
+		<!-- allow-list HTML sanitiser for merchant rich text (product and content descriptions) -->
+		<dependency>
+			<groupId>com.googlecode.owasp-java-html-sanitizer</groupId>
+			<artifactId>owasp-java-html-sanitizer</artifactId>
+			<version>${owasp-java-html-sanitizer.version}</version>
+		</dependency>
+
 		<!-- https://mvnrepository.com/artifact/org.passay/passay -->
 		<!-- Password rules library -->
 		<dependency>
@@ -161,6 +168,43 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<systemPropertyVariables>
+						<!-- the integration tests log in many times from one address;
+						     the rate limit filter has its own tests -->
+						<shopizer.ratelimit.enabled>false</shopizer.ratelimit.enabled>
+					</systemPropertyVariables>
+				</configuration>
+				<executions>
+					<execution>
+						<id>default-test</id>
+						<configuration>
+							<excludes>
+								<exclude>**/RateLimitWiringIntegrationTest.java</exclude>
+							</excludes>
+						</configuration>
+					</execution>
+					<execution>
+						<!-- the rate limits as wired in the application, in their own JVM:
+						     a second Spring context with other properties cannot start next
+						     to the shared one (one ehcache CacheManager per VM) -->
+						<id>rate-limit-wiring</id>
+						<phase>test</phase>
+						<goals>
+							<goal>test</goal>
+						</goals>
+						<configuration>
+							<test>RateLimitWiringIntegrationTest</test>
+							<systemPropertyVariables>
+								<shopizer.ratelimit.enabled>true</shopizer.ratelimit.enabled>
+							</systemPropertyVariables>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 		<finalName>shopizer</finalName>

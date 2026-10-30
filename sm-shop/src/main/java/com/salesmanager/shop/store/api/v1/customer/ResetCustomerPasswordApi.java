@@ -1,5 +1,7 @@
 package com.salesmanager.shop.store.api.v1.customer;
 
+import java.util.Map;
+
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletRequest;
 import javax.validation.Valid;
@@ -23,6 +25,7 @@ import com.salesmanager.core.model.reference.language.Language;
 import com.salesmanager.shop.store.api.exception.RestApiException;
 import com.salesmanager.shop.store.security.PasswordRequest;
 import com.salesmanager.shop.store.security.ResetPasswordRequest;
+import com.salesmanager.shop.store.security.abuse.PasswordResetResponse;
 
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiImplicitParam;
@@ -57,10 +60,18 @@ public class ResetCustomerPasswordApi {
 	@ApiOperation(httpMethod = "POST", value = "Launch customer password reset flow", notes = "", response = Void.class)
 	@ApiImplicitParams({ @ApiImplicitParam(name = "store", dataType = "String", defaultValue = "DEFAULT"),
 			@ApiImplicitParam(name = "lang", dataType = "String", defaultValue = "en") })
-	public void passwordResetRequest(@ApiIgnore MerchantStore merchantStore, @ApiIgnore Language language,
+	public Map<String, String> passwordResetRequest(@ApiIgnore MerchantStore merchantStore, @ApiIgnore Language language,
 			@Valid @RequestBody ResetPasswordRequest customer) {
 
-		customerFacade.requestPasswordReset(customer.getUsername(), customer.getReturnUrl(), merchantStore, language);
+		// Same status and body whether or not the account exists: an unknown
+		// username, a rejected return url or a mail failure is only logged.
+		try {
+			customerFacade.requestPasswordReset(customer.getUsername(), customer.getReturnUrl(), merchantStore, language);
+		} catch (RuntimeException e) {
+			LOGGER.warn("customer password reset request not completed: {}", e.getClass().getSimpleName());
+			LOGGER.debug("customer password reset request not completed", e);
+		}
+		return PasswordResetResponse.BODY;
 
 	}
 

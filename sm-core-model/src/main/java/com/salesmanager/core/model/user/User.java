@@ -150,6 +150,15 @@ public class User extends SalesManagerEntity<Long, User> implements Auditable {
 	@Embedded
 	private CredentialsReset credentialsResetRequest = null;
 
+	/**
+	 * When the password last changed. Tokens issued before this instant are
+	 * rejected, so a password change or reset signs out every other session.
+	 * Null until the first change after this column was introduced.
+	 */
+	@Temporal(TemporalType.TIMESTAMP)
+	@Column(name = "CREDENTIALS_CHANGED_AT")
+	private Date credentialsChangedAt;
+
 
 	public CredentialsReset getCredentialsResetRequest() {
 		return credentialsResetRequest;
@@ -201,7 +210,21 @@ public class User extends SalesManagerEntity<Long, User> implements Auditable {
 	}
 
 	public void setAdminPassword(String adminPassword) {
+		// Replacing an existing hash is a credentials change; setting the first
+		// password of a new user is not. Whole seconds, because token issue
+		// times (iat) have second precision and DATETIME columns round.
+		if (this.adminPassword != null && !this.adminPassword.equals(adminPassword)) {
+			this.credentialsChangedAt = new Date((System.currentTimeMillis() / 1000L) * 1000L);
+		}
 		this.adminPassword = adminPassword;
+	}
+
+	public Date getCredentialsChangedAt() {
+		return credentialsChangedAt == null ? null : new Date(credentialsChangedAt.getTime());
+	}
+
+	public void setCredentialsChangedAt(Date credentialsChangedAt) {
+		this.credentialsChangedAt = credentialsChangedAt == null ? null : new Date(credentialsChangedAt.getTime());
 	}
 
 	public String getFirstName() {
