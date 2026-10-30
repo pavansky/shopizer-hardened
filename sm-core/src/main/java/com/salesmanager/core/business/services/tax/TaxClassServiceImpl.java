@@ -31,6 +31,7 @@ public class TaxClassServiceImpl extends SalesManagerEntityServiceImpl<Long, Tax
 		return taxClassRepository.findByStore(store.getId());
 	}
 	
+	@Deprecated
 	@Override
 	public TaxClass getByCode(String code) throws ServiceException {
 		return taxClassRepository.findByCode(code);

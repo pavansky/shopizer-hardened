@@ -1,21 +1,23 @@
 package com.salesmanager.core.business.services.tax;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 
 import javax.inject.Inject;
 
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.salesmanager.core.business.exception.ServiceException;
+import com.salesmanager.core.business.services.shipping.ShippingService;
 import com.salesmanager.core.business.services.system.MerchantConfigurationService;
 import com.salesmanager.core.model.common.Billing;
 import com.salesmanager.core.model.common.Delivery;
@@ -25,6 +27,7 @@ import com.salesmanager.core.model.order.OrderSummary;
 import com.salesmanager.core.model.reference.country.Country;
 import com.salesmanager.core.model.reference.language.Language;
 import com.salesmanager.core.model.reference.zone.Zone;
+import com.salesmanager.core.model.shipping.ShippingConfiguration;
 import com.salesmanager.core.model.shipping.ShippingSummary;
 import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
 import com.salesmanager.core.model.system.MerchantConfiguration;
@@ -33,13 +36,15 @@ import com.salesmanager.core.model.tax.TaxConfiguration;
 import com.salesmanager.core.model.tax.TaxItem;
 import com.salesmanager.core.model.tax.taxclass.TaxClass;
 import com.salesmanager.core.model.tax.taxrate.TaxRate;
+import com.salesmanager.core.model.tax.taxrate.TaxRateDescription;
 
 @Service("taxService")
 public class TaxServiceImpl 
 		implements TaxService {
 	
+	private static final Logger LOGGER = LoggerFactory.getLogger(TaxServiceImpl.class);
+
 	private final static String TAX_CONFIGURATION = "TAX_CONFIG";
-	private final static String DEFAULT_TAX_CLASS = "DEFAULT";
 	
 	@Inject
 	private MerchantConfigurationService merchantConfigurationService;
@@ -49,6 +54,9 @@ public class TaxServiceImpl
 	
 	@Inject
 	private TaxClassService taxClassService;
+	
+	@Inject
+	private ShippingService shippingService;
 	
 	@Override
 	public TaxConfiguration getTaxConfiguration(MerchantStore store) throws ServiceException {
@@ -90,52 +98,62 @@ public class TaxServiceImpl
 	
 	@Override
 	public List<TaxItem> calculateTax(OrderSummary orderSummary, Customer customer, MerchantStore store, Language language) throws ServiceException {
-		
+		return calculateTax(orderSummary, customer, store, language, BigDecimal.ZERO);
+	}
+
+	@Override
+	public List<TaxItem> calculateTax(OrderSummary orderSummary, Customer customer, MerchantStore store, Language language, BigDecimal orderDiscount) throws ServiceException {
 
 		if(customer==null) {
 			return null;
 		}
 
 		List<ShoppingCartItem> items = orderSummary.getProducts();
-		
-		List<TaxItem> taxLines = new ArrayList<TaxItem>();
-		
 		if(items==null) {
-			return taxLines;
+			return new ArrayList<TaxItem>();
 		}
-		
+
 		//determine tax calculation basis
 		TaxConfiguration taxConfiguration = this.getTaxConfiguration(store);
 		if(taxConfiguration==null) {
 			taxConfiguration = new TaxConfiguration();
-			taxConfiguration.setTaxBasisCalculation(TaxBasisCalculation.SHIPPINGADDRESS);
 		}
-		
-		Country country = customer.getBilling().getCountry();
-		Zone zone = customer.getBilling().getZone();
-		String stateProvince = customer.getBilling().getState();
-		
 		TaxBasisCalculation taxBasisCalculation = taxConfiguration.getTaxBasisCalculation();
-		if(taxBasisCalculation.name().equals(TaxBasisCalculation.SHIPPINGADDRESS)){
-			Delivery shipping = customer.getDelivery();
-			if(shipping!=null) {
-				country = shipping.getCountry();
-				zone = shipping.getZone();
-				stateProvince = shipping.getState();
-			}
-		} else if(taxBasisCalculation.name().equals(TaxBasisCalculation.BILLINGADDRESS)){
-			Billing billing = customer.getBilling();
-			if(billing!=null) {
-				country = billing.getCountry();
-				zone = billing.getZone();
-				stateProvince = billing.getState();
-			}
-		} else if(taxBasisCalculation.name().equals(TaxBasisCalculation.STOREADDRESS)){
-			country = store.getCountry();
-			zone = store.getZone();
-			stateProvince = store.getStorestateprovince();
+		if(taxBasisCalculation==null) {
+			taxBasisCalculation = TaxBasisCalculation.SHIPPINGADDRESS;
 		}
-		
+
+		Country country = null;
+		Zone zone = null;
+		String stateProvince = null;
+
+		Billing billing = customer.getBilling();
+		if(billing!=null) {
+			country = billing.getCountry();
+			zone = billing.getZone();
+			stateProvince = billing.getState();
+		}
+
+		switch(taxBasisCalculation) {
+			case SHIPPINGADDRESS:
+				//falls back to the billing address when there is no delivery address
+				Delivery shipping = customer.getDelivery();
+				if(shipping!=null && shipping.getCountry()!=null) {
+					country = shipping.getCountry();
+					zone = shipping.getZone();
+					stateProvince = shipping.getState();
+				}
+				break;
+			case STOREADDRESS:
+				country = store.getCountry();
+				zone = store.getZone();
+				stateProvince = store.getStorestateprovince();
+				break;
+			case BILLINGADDRESS:
+			default:
+				break;
+		}
+
 		//check other conditions
 		//do not collect tax on other provinces of same country
 		if(!taxConfiguration.isCollectTaxIfDifferentProvinceOfStoreCountry()) {
@@ -156,7 +174,7 @@ public class TaxServiceImpl
 				}
 			}
 		}
-		
+
 		//collect tax in different countries
 		if(taxConfiguration.isCollectTaxIfDifferentCountryOfStoreCountry()) {
 			//use store country
@@ -164,139 +182,153 @@ public class TaxServiceImpl
 			zone = store.getZone();
 			stateProvince = store.getStorestateprovince();
 		}
-		
-		if(zone == null && StringUtils.isBlank(stateProvince)) {
+
+		if(country == null || (zone == null && StringUtils.isBlank(stateProvince))) {
 			return null;
 		}
-		
-		Map<Long,TaxClass> taxClasses =  new HashMap<Long,TaxClass>();
-			
-		//put items in a map by tax class id
-		Map<Long,BigDecimal> taxClassAmountMap = new HashMap<Long,BigDecimal>();
+
+		//products without a tax class use the store's DEFAULT class, as does shipping
+		TaxClass defaultTaxClass = null;
+		boolean defaultLookedUp = false;
+
+		List<BigDecimal> lineAmounts = new ArrayList<BigDecimal>();
+		List<TaxClass> lineClasses = new ArrayList<TaxClass>();
 		for(ShoppingCartItem item : items) {
-				
-				BigDecimal itemPrice = item.getItemPrice();
-				TaxClass taxClass = item.getProduct().getTaxClass();
-				int quantity = item.getQuantity();
-				itemPrice = itemPrice.multiply(new BigDecimal(quantity));
-				if(taxClass==null) {
-					taxClass = taxClassService.getByCode(DEFAULT_TAX_CLASS);
+			TaxClass taxClass = item.getProduct().getTaxClass();
+			if(taxClass==null) {
+				if(!defaultLookedUp) {
+					defaultTaxClass = defaultTaxClass(store);
+					defaultLookedUp = true;
 				}
-				BigDecimal subTotal = taxClassAmountMap.get(taxClass.getId());
-				if(subTotal==null) {
-					subTotal = new BigDecimal(0);
-					subTotal.setScale(2, RoundingMode.HALF_UP);
-				}
-					
-				subTotal = subTotal.add(itemPrice);
-				taxClassAmountMap.put(taxClass.getId(), subTotal);
-				taxClasses.put(taxClass.getId(), taxClass);
-				
-		}
-		
-		//tax on shipping ?
-		//ShippingConfiguration shippingConfiguration = shippingService.getShippingConfiguration(store);	
-		
-		/** always calculate tax on shipping **/
-		//if(shippingConfiguration!=null) {
-			//if(shippingConfiguration.isTaxOnShipping()){
-				//use default tax class for shipping
-				TaxClass defaultTaxClass = taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS);
-				//taxClasses.put(defaultTaxClass.getId(), defaultTaxClass);
-				BigDecimal amnt = taxClassAmountMap.get(defaultTaxClass.getId());
-				if(amnt==null) {
-					amnt = new BigDecimal(0);
-					amnt.setScale(2, RoundingMode.HALF_UP);
-				}
-				ShippingSummary shippingSummary = orderSummary.getShippingSummary();
-				if(shippingSummary!=null && shippingSummary.getShipping()!=null && shippingSummary.getShipping().doubleValue()>0) {
-					amnt = amnt.add(shippingSummary.getShipping());
-					if(shippingSummary.getHandling()!=null && shippingSummary.getHandling().doubleValue()>0) {
-						amnt = amnt.add(shippingSummary.getHandling());
-					}
-				}
-				taxClassAmountMap.put(defaultTaxClass.getId(), amnt);
-			//}
-		//}
-		
-		
-		List<TaxItem> taxItems = new ArrayList<TaxItem>();
-		
-		//iterate through the tax class and get appropriate rates
-		for(Long taxClassId : taxClassAmountMap.keySet()) {
-			
-			//get taxRate by tax class
-			List<TaxRate> taxRates = null; 
-			if(!StringUtils.isBlank(stateProvince)&& zone==null) {
-				taxRates = taxRateService.listByCountryStateProvinceAndTaxClass(country, stateProvince, taxClasses.get(taxClassId), store, language);
-			} else {
-				taxRates = taxRateService.listByCountryZoneAndTaxClass(country, zone, taxClasses.get(taxClassId), store, language);
+				taxClass = defaultTaxClass;
 			}
-			
-			if(taxRates==null || taxRates.size()==0){
+			lineClasses.add(taxClass);
+			lineAmounts.add(item.getItemPrice().multiply(new BigDecimal(item.getQuantity())));
+		}
+		List<BigDecimal> discountedAmounts = TaxCalculator.allocateDiscount(lineAmounts, orderDiscount);
+
+		//tax base by tax class, in cart order
+		Map<Long,BigDecimal> taxClassAmountMap = new LinkedHashMap<Long,BigDecimal>();
+		Map<Long,TaxClass> taxClasses = new HashMap<Long,TaxClass>();
+		for(int i = 0; i < lineClasses.size(); i++) {
+			TaxClass taxClass = lineClasses.get(i);
+			if(taxClass==null) {
+				//store without a DEFAULT class: no rate can apply to this line
 				continue;
 			}
-			BigDecimal taxedItemValue = null;
-			BigDecimal totalTaxedItemValue = new BigDecimal(0);
-			totalTaxedItemValue.setScale(2, RoundingMode.HALF_UP);
-			BigDecimal beforeTaxeAmount = taxClassAmountMap.get(taxClassId);
-			for(TaxRate taxRate : taxRates) {
-				
-				double taxRateDouble = taxRate.getTaxRate().doubleValue();//5% ... 8% ...
-				
+			taxClassAmountMap.merge(taxClass.getId(), discountedAmounts.get(i), BigDecimal::add);
+			taxClasses.put(taxClass.getId(), taxClass);
+		}
 
-				if(taxRate.isPiggyback()) {//(compound)
-					if(totalTaxedItemValue.doubleValue()>0) {
-						beforeTaxeAmount = totalTaxedItemValue;
-					}
-				} //else just use nominal taxing (combine)
-				
-				double value  = (beforeTaxeAmount.doubleValue() * taxRateDouble)/100;
-				double roundedValue = new BigDecimal(value).setScale(2, RoundingMode.HALF_UP).doubleValue();
-				taxedItemValue = new BigDecimal(roundedValue).setScale(2, RoundingMode.HALF_UP);
-				totalTaxedItemValue = beforeTaxeAmount.add(taxedItemValue);
-				
-				TaxItem taxItem = new TaxItem();
-				taxItem.setItemPrice(taxedItemValue);
-				taxItem.setLabel(taxRate.getDescriptions().get(0).getName());
-				taxItem.setTaxRate(taxRate);
-				taxItems.add(taxItem);
-				
+		//shipping is taxed at the DEFAULT class, only when the store taxes shipping
+		BigDecimal taxableShipping = taxableShipping(orderSummary.getShippingSummary(), store);
+		if(taxableShipping.signum() > 0 && !defaultLookedUp) {
+			defaultTaxClass = defaultTaxClass(store);
+		}
+		if(taxableShipping.signum() > 0 && defaultTaxClass!=null) {
+			taxClassAmountMap.merge(defaultTaxClass.getId(), taxableShipping, BigDecimal::add);
+			taxClasses.put(defaultTaxClass.getId(), defaultTaxClass);
+		}
+
+		//one tax line per rate code, rates of a class only apply to that class
+		Map<String,TaxItem> taxItemsMap = new LinkedHashMap<String,TaxItem>();
+		for(Map.Entry<Long,BigDecimal> entry : taxClassAmountMap.entrySet()) {
+
+			TaxClass taxClass = taxClasses.get(entry.getKey());
+			List<TaxRate> taxRates = null;
+			if(!StringUtils.isBlank(stateProvince)&& zone==null) {
+				taxRates = taxRateService.listByCountryStateProvinceAndTaxClass(country, stateProvince, taxClass, store, language);
+			} else {
+				taxRates = taxRateService.listByCountryZoneAndTaxClass(country, zone, taxClass, store, language);
 			}
-			
+
+			if(taxRates==null || taxRates.isEmpty()){
+				continue;
+			}
+
+			List<BigDecimal> amounts = TaxCalculator.applyRates(entry.getValue(), taxRates);
+			for(int i = 0; i < taxRates.size(); i++) {
+				TaxRate taxRate = taxRates.get(i);
+				TaxItem taxItem = taxItemsMap.get(taxRate.getCode());
+				if(taxItem==null) {
+					taxItem = new TaxItem();
+					taxItem.setItemPrice(amounts.get(i));
+					taxItem.setLabel(label(taxRate, language));
+					taxItem.setTaxRate(taxRate);
+					taxItemsMap.put(taxRate.getCode(), taxItem);
+				} else {
+					taxItem.setItemPrice(taxItem.getItemPrice().add(amounts.get(i)));
+				}
+			}
 		}
-		
-		
-		
-		Map<String,TaxItem> taxItemsMap = new TreeMap<String,TaxItem>();
-		//consolidate tax rates of same code
-		for(TaxItem taxItem : taxItems) {
-			
-			TaxRate taxRate = taxItem.getTaxRate();
-			if(!taxItemsMap.containsKey(taxRate.getCode())) {
-				taxItemsMap.put(taxRate.getCode(), taxItem);
-			} 
-			
-			TaxItem item = taxItemsMap.get(taxRate.getCode());
-			BigDecimal amount = item.getItemPrice();
-			amount = amount.add(taxItem.getItemPrice());			
-			
-		}
-		
-		if(taxItemsMap.size()==0) {
+
+		if(taxItemsMap.isEmpty()) {
 			return null;
 		}
-			
-			
-		@SuppressWarnings("rawtypes")
-		Collection<TaxItem> values = taxItemsMap.values();
-		
-		
-		@SuppressWarnings("unchecked")
-		List<TaxItem> list = new ArrayList<TaxItem>(values);
-		return list;
+
+		//receipt order: by tax priority, so a compound tax follows the tax it compounds
+		List<TaxItem> taxItems = new ArrayList<TaxItem>(taxItemsMap.values());
+		taxItems.sort(Comparator.comparingInt((TaxItem t) -> priority(t.getTaxRate())));
+		return taxItems;
 
 	}
 
+	/**
+	 * The store's DEFAULT tax class, or null when the store has none (the
+	 * store API does not create it). Unclassified lines and shipping are then
+	 * not taxed: picking another class would charge a rate nobody configured
+	 * for those lines. Logged, since it usually means a setup problem.
+	 */
+	private TaxClass defaultTaxClass(MerchantStore store) throws ServiceException {
+		TaxClass defaultTaxClass = taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store);
+		if(defaultTaxClass==null) {
+			LOGGER.warn("Store {} has no {} tax class, products without a tax class and shipping are not taxed",
+					store.getCode(), TaxClass.DEFAULT_TAX_CLASS);
+		}
+		return defaultTaxClass;
+	}
+
+	private static int priority(TaxRate taxRate) {
+		return taxRate!=null && taxRate.getTaxPriority()!=null ? taxRate.getTaxPriority() : 0;
+	}
+
+	/**
+	 * Shipping and handling as charged by OrderServiceImpl, when the store's
+	 * shipping configuration says shipping is taxable. Free shipping is not
+	 * taxed; handling is charged, and taxed, only when the store has handling fees.
+	 */
+	private BigDecimal taxableShipping(ShippingSummary shippingSummary, MerchantStore store) throws ServiceException {
+		if(shippingSummary==null) {
+			return BigDecimal.ZERO;
+		}
+		ShippingConfiguration shippingConfiguration = shippingService.getShippingConfiguration(store);
+		if(shippingConfiguration==null || !shippingConfiguration.isTaxOnShipping()) {
+			return BigDecimal.ZERO;
+		}
+		BigDecimal amount = BigDecimal.ZERO;
+		if(!shippingSummary.isFreeShipping() && shippingSummary.getShipping()!=null && shippingSummary.getShipping().signum() > 0) {
+			amount = amount.add(shippingSummary.getShipping());
+		}
+		BigDecimal handlingFees = shippingConfiguration.getHandlingFees();
+		if(shippingSummary.getHandling()!=null && shippingSummary.getHandling().signum() > 0
+				&& handlingFees!=null && handlingFees.signum() > 0) {
+			amount = amount.add(shippingSummary.getHandling());
+		}
+		return amount;
+	}
+
+	private static String label(TaxRate taxRate, Language language) {
+		TaxRateDescription first = null;
+		for(TaxRateDescription description : taxRate.getDescriptions()) {
+			if(first==null) {
+				first = description;
+			}
+			if(language!=null && description.getLanguage()!=null
+					&& language.getCode()!=null && language.getCode().equals(description.getLanguage().getCode())) {
+				return description.getName();
+			}
+		}
+		return first!=null ? first.getName() : taxRate.getCode();
+	}
 
 }

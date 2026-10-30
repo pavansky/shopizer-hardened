@@ -1,5 +1,6 @@
 package com.salesmanager.core.business.services.tax;
 
+import java.util.Collections;
 import java.util.List;
 
 import javax.inject.Inject;
@@ -47,14 +48,24 @@ public class TaxRateServiceImpl extends SalesManagerEntityServiceImpl<Long, TaxR
 		return taxRateRepository.findByStoreAndCode(store.getId(), code);
 	}
 	
+	/**
+	 * The language is not a filter: a rate applies whatever languages its
+	 * descriptions exist in.
+	 */
 	@Override
 	public List<TaxRate> listByCountryZoneAndTaxClass(Country country, Zone zone, TaxClass taxClass, MerchantStore store, Language language) throws ServiceException {
-		return taxRateRepository.findByMerchantAndZoneAndCountryAndLanguage(store.getId(), zone.getId(), country.getId(), language.getId());
+		if (taxClass == null || taxClass.getId() == null) {
+			return Collections.emptyList();
+		}
+		return taxRateRepository.findByMerchantAndZoneAndCountryAndTaxClass(store.getId(), zone.getId(), country.getId(), taxClass.getId());
 	}
 	
 	@Override
 	public List<TaxRate> listByCountryStateProvinceAndTaxClass(Country country, String stateProvince, TaxClass taxClass, MerchantStore store, Language language) throws ServiceException {
-		return taxRateRepository.findByMerchantAndProvinceAndCountryAndLanguage(store.getId(), stateProvince, country.getId(), language.getId());
+		if (taxClass == null || taxClass.getId() == null) {
+			return Collections.emptyList();
+		}
+		return taxRateRepository.findByMerchantAndProvinceAndCountryAndTaxClass(store.getId(), stateProvince, country.getId(), taxClass.getId());
 	}
 	
 	@Override

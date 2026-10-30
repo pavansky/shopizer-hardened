@@ -11,6 +11,11 @@ public interface TaxClassService extends SalesManagerEntityService<Long, TaxClas
 
 	List<TaxClass> listByStore(MerchantStore store) throws ServiceException;
 
+	/**
+	 * @deprecated not store scoped and fails once two stores share a code;
+	 * use {@link #getByCode(String, MerchantStore)}
+	 */
+	@Deprecated
 	TaxClass getByCode(String code) throws ServiceException;
 
 	TaxClass getByCode(String code, MerchantStore store)
