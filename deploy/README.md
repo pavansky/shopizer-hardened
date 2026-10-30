@@ -9,7 +9,8 @@ One command brings up the whole platform on a laptop, with no cloud account and 
 | API | http://localhost:8080/swagger-ui.html | The REST API |
 | Grafana | http://localhost:3001 | Checkout latency, reconciler outcomes, DB pool |
 | Prometheus | http://localhost:9090/alerts | Payment alert rules |
-| Mailpit | http://localhost:8025 | Order confirmation emails, caught locally |
+| Mailpit | http://localhost:8025 | Order, status and alert emails, caught locally |
+| Alertmanager | http://localhost:9093 | Alert routing (to Mailpit in the demo) |
 
 ## 1. Set up once
 
@@ -27,7 +28,7 @@ git clone https://github.com/pavansky/shopizer-admin-hardened.git
 git clone https://github.com/pavansky/shopizer-shop-hardened.git
 ```
 
-Create the secrets file and change every value.
+Create the secrets file and change every value. Generate the credential encryption key with `openssl rand -base64 32` and keep it safe: losing it makes stored gateway credentials unreadable.
 
 ```bash
 cp shopizer-hardened/deploy/.env.example shopizer-hardened/deploy/.env
@@ -57,6 +58,20 @@ It creates a category and a product, then shows each fix in turn:
 - an idempotent checkout retry
 - partial, over-limit and full refunds
 - the final order status
+
+## 3b. Show the third-pass fixes
+
+```bash
+scripts/demo-tier1.sh http://localhost:8080
+```
+
+It cancels an order (refund and restock), shows the bypass attempt refused, masked gateway keys, a 404 for another store's customer, the login rate limit, and the cache headers. The rate limit is per address: after showing the 429s, wait one minute before logging in to the admin again.
+
+**Browser tests.** From the storefront repository:
+
+```bash
+cd ../shopizer-shop-hardened/tests/e2e && docker run --rm --network host -v "$PWD":/e2e -w /e2e -e BASE_URL=http://localhost:3000 mcr.microsoft.com/playwright:v1.48.2-jammy sh -c "npm ci && npx playwright test"
+```
 
 ## 4. Show the failure handling live
 

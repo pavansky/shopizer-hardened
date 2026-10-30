@@ -48,5 +48,5 @@ echo "nothing left       : $(refund '{}')"
 
 echo "== Orders recorded"
 curl -s "$API/v1/private/orders?count=20" -H "$AUTH" | python3 -c "import sys,json;d=json.load(sys.stdin);[print(' order',o['id'],o.get('orderStatus')) for o in d.get('orders',[])]"
-echo "stock left for oak-bench (started at 5):"
+echo "stock left for oak-bench (started at 5; the full refund returned the item):"
 curl -s "$API/v1/product/oak-bench?store=DEFAULT" | python3 -c "import sys,json;d=json.load(sys.stdin);print(' quantity', d.get('quantity'))" || true

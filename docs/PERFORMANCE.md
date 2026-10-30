@@ -58,3 +58,23 @@ docker run --rm -i --network host -e BASE=http://localhost:8080 grafana/k6:1.3.0
 ```
 
 Watch the Grafana dashboard at http://localhost:3001 while it runs.
+
+## 6. After the third pass: the catalog fix, measured
+
+The first measurement used one product, so it could not show the catalog problem. This one used `scripts/seed-catalog.sh` with 1,001 products on MySQL 8.4, the same database for the old and new builds.
+
+| Measure | Before | After |
+|---|---|---|
+| MySQL bytes read per 15-product listing page | 96.6 MB | 126 KB |
+| Listing p50 | 5.8 s | 26 ms |
+| k6 mixed load | Old build ran out of memory and was killed | 749 rps; products p95 62 ms, product p95 35 ms, category p95 24 ms |
+| Product page, rich product (10 images, 5 variants), MySQL bytes | 165.7 KB | 62.3 KB |
+| Product page, small product, MySQL bytes | 54.9 KB | 59.7 KB |
+| Unknown slug | 500, 31.9 KB | 404, 8.0 KB |
+
+**What changed.** The listing pages over product ids in SQL and then batch-loads the collections, and tests fail if a query pages in memory over a collection fetch. The product page loads each collection with its own statement instead of one Cartesian join.
+
+**Honest limits.** On a small product the new loader reads slightly more, because per-statement overhead (about 4 KB) dominates. The gain is on rich products and listings, which is where real catalogs live. Latencies at this size are within the noise of a shared Docker VM; the byte counts are the meaningful figures.
+
+**Connections.** Requests no longer hold a database connection for their whole life: Hibernate releases it after each transaction, so a slow payment gateway cannot pin connections. A pool wait longer than 2 s answers 503 with Retry-After instead of queueing for 30 s.
+

@@ -17,6 +17,14 @@ The architecture is kept on purpose. This is the same modular monolith, with cor
 | Order status | Any change allowed | Explicit transition table, 409 on illegal moves |
 | Capture and refund | Returned 200 and did nothing | Real operations: store-scoped, amount-checked, row-locked, recorded as REFUND |
 | Stuck orders | Left in limbo, or failed while the customer was charged | Write-ahead payment attempts, gateway lookups, signed Stripe webhooks, review queue, automatic refund of late charges |
+| Customer data | Readable and editable across stores by id | Store-scoped everywhere, store-bound customer tokens, two-store integration test |
+| Gateway keys | Plain text to any staff user; static-IV AES with a committed key | Masked, admin-only, AES-256-GCM with an environment key, audited |
+| Tax | Basis and tax class ignored, `double` arithmetic | Golden-tested, per line, discounts before tax |
+| Order status | Cancel moved no money or stock | Cancel and refund commands that refund and restock; admin offers legal steps only |
+| Catalog at scale | 96.6 MB read per listing page on 1,001 products | 126 KB; 749 rps where the old build ran out of memory |
+| Gateway outages | SDK default timeouts, up to about 4 minutes | 3 s / 15 s timeouts and a bulkhead; 503 before any charge when saturated |
+| Abuse | No rate limits; staff were all-powerful | 429 and lockout; per-group permissions with a build-time coverage check; CSP; sanitised HTML; audit trail |
+| Operations | Backups could lie; alerts reached no one | Validated backups with a freshness alert, Alertmanager, request ids, JSON logs, per-store metrics, end-to-end CI |
 | Store isolation | SKU queries drop the store filter | Every SKU query scoped to the caller's store |
 | Tokens | One secret `aSecret`, 7 days, admin and customer interchangeable | `JWT_SECRET` 64+ bytes, 1 hour, typed tokens |
 | Default access | Unlisted paths unauthenticated. All actuator endpoints public | Deny by default. Only health and info public |
@@ -36,7 +44,7 @@ The whole platform runs locally with one command: API, MySQL, admin, storefront,
 ## Read in this order
 
 1. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): before and after diagrams for security, checkout, payments and runtime.
-2. [docs/FIXES.md](docs/FIXES.md): the 40 defects, where they were, the effect, the fix and the test.
+2. [docs/FIXES.md](docs/FIXES.md): the 79 defects, where they were, the effect, the fix and the test.
 3. [docs/adr](docs/adr): one page per design decision, including what was kept and why.
 4. The commit history: one commit per fix, on top of the tag `baseline-3.2.7`.
 
@@ -75,6 +83,12 @@ Start the app, then run the end-to-end demo. It sets up a product, checks the se
 
 ```bash
 scripts/demo-checkout.sh http://localhost:8080
+```
+
+Then the third-pass fixes: cancel that refunds and restocks, masked gateway keys, tenant isolation, rate limits and caching headers.
+
+```bash
+scripts/demo-tier1.sh http://localhost:8080
 ```
 
 Or check single defects by hand:

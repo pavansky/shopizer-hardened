@@ -87,7 +87,53 @@ These came up when running the fixed build end to end, and are fixed in the same
 
 ## How it was verified
 
-- `mvn verify`: 212 tests, 0 failures (21 skipped are upstream `@Ignore`).
+- `mvn verify`: 589 tests, 0 failures (21 skipped are upstream `@Ignore`).
 - [scripts/demo-checkout.sh](../scripts/demo-checkout.sh) against a fresh instance. Output: [demo-output.txt](demo-output.txt).
 - `mysql` profile on an empty MySQL 8 database: Flyway applies V1 to V3, Hibernate validates the mapping, and the application starts.
 - Real MySQL 8: Flyway applies V1 to V4, the demo passes, and a simulated crash (order `PAYMENT_PENDING`, attempt `UNKNOWN`, two days old) is moved to `PAYMENT_REVIEW` by the reconciler instead of being failed.
+
+## Third pass: the Tier 1 gaps from the world-class review
+
+A review against Amazon, Flipkart, Shopify and Zalando found 83 verified gaps (see the gap review in the interview pack). The ten Tier 1 gaps, plus the cheapest Tier 2 items, are closed here. Each area was built on its own branch, attacked by a second reviewer, fixed and merged. Full notes, tests and what is still open: [TIER1-CHANGES.md](TIER1-CHANGES.md).
+
+| # | Defect | Effect | Fix | Proof |
+|---|---|---|---|---|
+| 48 | Customer endpoints loaded customers by id without the store | Staff of one store could read, edit, move or delete another store's customers | Store-scoped lookups everywhere, 404 for another store's id; PUT never moves a record | Two-store integration test over every customer endpoint; `demo-tier1.sh` |
+| 49 | Customer login and tokens were not bound to a store | The same email in two stores broke login; a token worked on any store | Login in the request's store; `store` claim in the customer JWT | `CustomerTokenStoreBindingTest` |
+| 50 | Registration with a body id overwrote that account | Account takeover through `register` | The id in the body is ignored on register and create | Integration tests |
+| 51 | Reviews and related products were not store-scoped | Another store's data on product pages | Store-scoped reads | Integration test |
+| 52 | Tax basis compared a String with an enum | Every order taxed on the billing address | Switch on the enum | Golden tests |
+| 53 | Tax class ignored; amounts dropped; `double` arithmetic | Wrong totals with two tax classes | Class-scoped rate queries, summed amounts, `BigDecimal` per line, discounts before tax, store setting for shipping tax | `TaxCalculationGoldenTest`, `TaxServiceImplGoldenTest` |
+| 54 | `DEFAULT` tax class looked up across stores | A second store's `DEFAULT` broke taxed checkout everywhere | Store-scoped lookup; each new store gets its own `DEFAULT` | Golden tests |
+| 55 | Gateway secrets returned in plain text to any staff user | Live Stripe/Braintree keys readable or replaceable | Masked on read (`****1234`), a masked value keeps the stored secret, admin role and same store required | `PaymentConfigurationApiIntegrationTest`; `demo-tier1.sh` |
+| 56 | AES-128-CBC, static IV, key committed in six profiles | One database dump plus the public repo decrypts every merchant's credentials | AES-256-GCM, random IV, `v2:` prefix, key from `SHOPIZER_ENCRYPTION_KEY`; production profiles refuse to start without it; legacy values read once and re-encrypted | `EncryptionImplTest` with a fixed legacy vector |
+| 57 | Credential changes left no trace | No answer to "who changed the keys?" | Append-only `CONFIGURATION_AUDIT` (V5) with key names only, plus an email to the store | Integration test; Mailpit |
+| 58 | Status changes to CANCELED or REFUNDED moved no money or stock | Labels contradicted the ledger; stock leaked | `POST /orders/{id}/cancel` refunds or voids, restocks and sets CANCELED; `PUT /status` only for fulfilment moves | `OrderLifecycleIntegrationTest`; `demo-tier1.sh` |
+| 59 | Admin "Update status" only wrote a history row | The merchant's main control did nothing | Admin calls the state machine with legal next steps only; Cancel, Re-check and Confirm payment buttons | Admin build; lifecycle tests |
+| 60 | Full refund did not restock; PAYMENT_REVIEW could never be settled | Inventory too low; orders stuck forever | Restock on full refund; recheck and confirm commands for orders in review | Lifecycle tests |
+| 61 | Product listing paged in memory over ~20 joined collections | 96.6 MB read per 15-product page on 1,001 products, 5.8 s p50, out of memory under load | Page ids in SQL, then batch-load; build fails on in-memory pagination | `ProductListingQueryTest`; 126 KB and 26 ms after; 749 rps under k6 |
+| 62 | Slug lookup ignored the store; unknown slug gave 500 | Another store's product on a PDP | Scoped by store and language, 404 for unknown | `ProductSlugLookupTest` |
+| 63 | A request held its DB connection for its whole life | A slow gateway drains the pool | Connections released after each transaction; 2 s pool wait, then 503 with Retry-After | `ConnectionReleaseTest`, `RestErrorHandlerPoolTimeoutTest` |
+| 64 | Stripe and Braintree ran on SDK default timeouts (up to about 4 minutes) | One slow gateway stalls checkout for every store | 3 s connect, 15 s read, bounded retries, and a per-gateway bulkhead that fails fast with 503 before any charge | Unit and HTTP integration tests |
+| 65 | Payment init took the amount from the request body | A client could set its own price | Amount from the server-side cart total; mismatch is 409 | `OrderPaymentApiInitTest` |
+| 66 | No 3-D Secure | EEA, UK and Indian cards fail SCA | Stripe Payment Element with `confirmPayment`; `requires_action` is "not paid yet" (409 with the client secret), resumed with the same Idempotency-Key | Unit tests, jest, sandbox IT (needs keys) |
+| 67 | Dashboard refunds and disputes never reached the shop | Ledger out of date | `charge.refunded`, `charge.refund.updated`, `charge.dispute.*` webhooks, idempotent by Stripe id | `StripeWebhookApiTest` |
+| 68 | No rate limits; login revealed whether accounts exist | Card testing and credential stuffing | Per-address and per-account limits with 429 and lockout; identical answers for unknown and wrong-password; reset requests answer the same way | `RateLimitFilterTest`, `LockoutAuthenticationProviderTest`; `demo-tier1.sh` |
+| 69 | Every `/private` endpoint needed only "logged in" | Any staff member could change payment keys or users | URL rules per permission group; a test fails the build if any `/private` endpoint is only covered by the generic rule | RBAC coverage test |
+| 70 | Disabled admins and changed passwords kept access | Departed staff kept working tokens | Active check and credential-change time checked on every request (V7) | `AdminLoginAndSessionIntegrationTest` |
+| 71 | No CSP; product HTML stored unsanitised | A stored script could skim cards | CSP and related headers on API, storefront and admin; OWASP sanitiser on save | Header checks; sanitiser tests |
+| 72 | Audit did not record who acted | No forensics | `ADMIN_AUDIT` row for every mutating admin request; `modifiedBy` from the signed-in user | Audit tests |
+| 73 | Backup script logged "backup ok" for a failed, empty dump | Silent data loss | `pipefail`, dump validation (gzip, size, table count), status file, freshness metric and `BackupStale` alert; the drill exits non-zero on any mismatch | Live: dump validated with 94 tables; `RESTORE DRILL PASSED` |
+| 74 | Alerts went nowhere; the review alert cleared while orders were still in review | Pages reach no one | Alertmanager to email (Mailpit in the demo), Watchdog alert, review alert driven by a live gauge of orders in review | Live: Watchdog email received in Mailpit; review alert firing |
+| 75 | No request ids; logs were plain text | No way to follow one request | `X-Request-Id` in and out, carried into async work; JSON logs with `LOG_FORMAT=json` | `RequestIdFilterTest` |
+| 76 | No per-store health | A revoked key fails one merchant silently | Store tag on request metrics and a payment outcome counter; Grafana panels | Live Prometheus |
+| 77 | No end-to-end test of the whole stack | Integration breaks found late | `e2e.yml` builds the stack, runs both demo scripts, the stuck-order simulation, the restore drill and five Playwright specs; Dependabot in all three repos | Local Playwright run: 6 of 6 passed |
+| 78 | US$ on order pages of a CAD store; no focus outline; unlabelled controls; no canonical, JSON-LD, 404 or sitemap | Wrong receipts; inaccessible; invisible to search | Order currency, WCAG basics with an axe check in CI, canonical and Product JSON-LD, 404 page, `GET /api/v1/sitemap.xml` | Unit tests, axe check, `SitemapIntegrationTest` |
+| 79 | `database.properties` for the default profile was git-ignored | A fresh clone could not start | Tracked | Fresh build |
+
+### Still on the roadmap, deliberately
+
+- **Search, promotions, fulfilment and returns.** Each is a multi-week build. See the gap review for the first step of each.
+- **TOTP MFA for admins.** Rate limits, lockout, deactivation and token revocation are in place; MFA is next.
+- **Verified email on registration.** Needed to close the last bit of account enumeration.
+- **Real-gateway proof.** The sandbox suite, including the 3-D Secure test, runs as soon as test keys are set.
