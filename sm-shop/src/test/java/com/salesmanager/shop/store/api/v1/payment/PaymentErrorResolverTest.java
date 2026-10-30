@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentIntentInUseException;
 import com.salesmanager.core.business.services.payments.PaymentGatewayBusyException;
 import com.salesmanager.shop.store.api.exception.ServiceRuntimeException;
 
@@ -57,6 +58,20 @@ class PaymentErrorResolverTest {
 		assertEquals("pi_3ds", body.path("paymentIntentId").asText());
 		assertEquals("requires_action", body.path("paymentIntentStatus").asText());
 		assertEquals(42L, body.path("orderId").asLong());
+	}
+
+	@Test
+	void intentHeldByAnotherCartIs409WithoutItsSecret() throws Exception {
+		MockHttpServletResponse response = new MockHttpServletResponse();
+
+		resolver.resolveException(new MockHttpServletRequest(), response, null,
+				new ServiceException(new PaymentIntentInUseException("pi_other")));
+
+		assertEquals(409, response.getStatus());
+		JsonNode body = new ObjectMapper().readTree(response.getContentAsString());
+		assertEquals(PaymentErrorResolver.INTENT_IN_USE_CODE, body.path("errorCode").asText());
+		assertTrue(body.path("clientSecret").isMissingNode());
+		assertTrue(body.path("orderId").isMissingNode());
 	}
 
 	@Test

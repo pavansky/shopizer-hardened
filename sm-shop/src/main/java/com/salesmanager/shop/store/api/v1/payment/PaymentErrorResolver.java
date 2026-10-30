@@ -18,6 +18,7 @@ import org.springframework.web.servlet.ModelAndView;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentIntentInUseException;
 import com.salesmanager.core.business.services.payments.PaymentGatewayBusyException;
 
 /**
@@ -29,6 +30,8 @@ import com.salesmanager.core.business.services.payments.PaymentGatewayBusyExcept
  * PaymentIntent client secret. Nothing was charged; the order stays open while the
  * customer completes 3-D Secure, then the client retries with the same
  * Idempotency-Key.</li>
+ * <li>{@link PaymentIntentInUseException}: 409 payment_intent_in_use. The PaymentIntent
+ * is held by another cart's waiting order; nothing was reserved or charged.</li>
  * <li>{@link PaymentGatewayBusyException}: 503 with Retry-After. The gateway was
  * never called, so retrying with the same Idempotency-Key is safe.</li>
  * </ul>
@@ -45,6 +48,7 @@ public class PaymentErrorResolver implements HandlerExceptionResolver, Ordered {
 
 	public static final String ACTION_REQUIRED_CODE = "payment_action_required";
 	public static final String GATEWAY_BUSY_CODE = "payment_gateway_busy";
+	public static final String INTENT_IN_USE_CODE = "payment_intent_in_use";
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -58,6 +62,7 @@ public class PaymentErrorResolver implements HandlerExceptionResolver, Ordered {
 	/** True when the failure is one this resolver answers; callers that swallow errors rethrow these. */
 	public static boolean handles(Throwable e) {
 		return find(e, PaymentActionRequiredException.class) != null
+				|| find(e, PaymentIntentInUseException.class) != null
 				|| find(e, PaymentGatewayBusyException.class) != null;
 	}
 
@@ -73,6 +78,13 @@ public class PaymentErrorResolver implements HandlerExceptionResolver, Ordered {
 			body.put("paymentIntentStatus", action.getStatus());
 			body.put("clientSecret", action.getClientSecret());
 			body.put("orderId", action.getOrderId());
+			return write(response, HttpServletResponse.SC_CONFLICT, body);
+		}
+		if (find(ex, PaymentIntentInUseException.class) != null) {
+			// the secret and the other order are not echoed back
+			Map<String, Object> body = new LinkedHashMap<>();
+			body.put("errorCode", INTENT_IN_USE_CODE);
+			body.put("message", "This payment belongs to another checkout; start the payment again.");
 			return write(response, HttpServletResponse.SC_CONFLICT, body);
 		}
 		PaymentGatewayBusyException busy = find(ex, PaymentGatewayBusyException.class);

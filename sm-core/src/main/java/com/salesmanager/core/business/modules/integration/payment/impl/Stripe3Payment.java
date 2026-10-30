@@ -195,6 +195,7 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			
 			PaymentIntent paymentIntent = retrievePaymentIntent(token, requestOptions);
 
+			checkStartedForCart(paymentIntent, payment);
 			checkConfirmedByCustomer(paymentIntent);
 			
 			transaction.setAmount(amount);
@@ -338,6 +339,7 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 			PaymentIntent paymentIntent = retrievePaymentIntent(token, requestOptions);
 
+			checkStartedForCart(paymentIntent, payment);
 			checkConfirmedByCustomer(paymentIntent);
 			checkCapturable(paymentIntent, minorAmount);
 
@@ -430,6 +432,27 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 		
 	}
 	
+	/**
+	 * Payment init records the cart in the PaymentIntent metadata (cart_code). A checkout
+	 * of another cart must not capture it, nor learn its client secret through the
+	 * "action required" answer, so this check runs first. Intents without cart_code
+	 * (created outside the shop) and payments without a cart are not checked.
+	 */
+	static void checkStartedForCart(PaymentIntent paymentIntent, Payment payment) throws IntegrationException {
+		String cartCode = payment.getPaymentMetaData() == null ? null
+				: payment.getPaymentMetaData().get(META_CART_CODE);
+		String intentCart = paymentIntent.getMetadata() == null ? null : paymentIntent.getMetadata().get("cart_code");
+		if (StringUtils.isBlank(cartCode) || StringUtils.isBlank(intentCart) || cartCode.equals(intentCart)) {
+			return;
+		}
+		IntegrationException te = new IntegrationException(
+				"Stripe PaymentIntent " + paymentIntent.getId() + " was started for another cart");
+		te.setExceptionType(IntegrationException.EXCEPTION_PAYMENT_DECLINED);
+		te.setMessageCode("message.payment.declined");
+		te.setErrorCode(IntegrationException.TRANSACTION_EXCEPTION);
+		throw te;
+	}
+
 	/**
 	 * A PaymentIntent the customer has not finished (3-D Secure challenge pending, card
 	 * refused at confirmation, or never confirmed) is "not paid yet", not a decline: the

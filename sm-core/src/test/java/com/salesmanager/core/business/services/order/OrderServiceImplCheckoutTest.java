@@ -31,6 +31,8 @@ import org.mockito.InOrder;
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.repositories.order.OrderRepository;
 import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentIntentInUseException;
+import com.salesmanager.core.business.modules.integration.payment.impl.Stripe3Payment;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
 import com.salesmanager.core.model.customer.Customer;
@@ -59,7 +61,14 @@ class OrderServiceImplCheckoutTest {
 	private final MerchantStore store = new MerchantStore();
 	private final Payment payment = new Payment();
 	private final OrderTotalSummary summary = new OrderTotalSummary();
-	private final List<ShoppingCartItem> items = Collections.singletonList(new ShoppingCartItem());
+	private final List<ShoppingCartItem> items = Collections.singletonList(line("sku-1", 1));
+
+	private static ShoppingCartItem line(String sku, int quantity) {
+		ShoppingCartItem item = new ShoppingCartItem();
+		item.setSku(sku);
+		item.setQuantity(quantity);
+		return item;
+	}
 
 	@BeforeEach
 	void setUp() throws Exception {
@@ -86,6 +95,7 @@ class OrderServiceImplCheckoutTest {
 		store.setId(1);
 		payment.setModuleName("braintree");
 		order.setTotal(new BigDecimal("10.00"));
+		order.setShoppingCartCode("cart-1");
 	}
 
 	@Test
@@ -265,7 +275,13 @@ class OrderServiceImplCheckoutTest {
 		open.setId(7L);
 		open.setStatus(OrderStatus.PAYMENT_PENDING);
 		open.setTotal(total);
-		when(orders.findById(7L)).thenReturn(java.util.Optional.of(open));
+		open.setShoppingCartCode("cart-1");
+		com.salesmanager.core.model.order.orderproduct.OrderProduct reserved =
+				new com.salesmanager.core.model.order.orderproduct.OrderProduct();
+		reserved.setSku("sku-1");
+		reserved.setProductQuantity(1);
+		open.getOrderProducts().add(reserved);
+		when(orders.findOne(7L, 1)).thenReturn(open);
 		return open;
 	}
 
@@ -336,6 +352,68 @@ class OrderServiceImplCheckoutTest {
 		sequence.verify(steps).reconcileUnpaidOrder(eq(7L), anyString(), eq(800L));
 		sequence.verify(steps).createPendingOrder(order, customer, items, null);
 		sequence.verify(steps).markPaymentSucceeded(42L, OrderStatus.ORDERED, tx, 900L);
+	}
+
+	@Test
+	void sameIntentFromAnotherCartIsRefusedAndTheWaitingOrderIsLeftAlone() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("10.00"));
+		order.setShoppingCartCode("cart-2");
+
+		assertThrows(PaymentIntentInUseException.class,
+				() -> service.processOrder(order, customer, items, summary, payment, store));
+
+		// neither resumed (no capture of the other customer's order) nor superseded
+		// (its stock is not released), and nothing reserved for this checkout
+		verify(steps, never()).reconcileUnpaidOrder(any(), any(), any());
+		verify(steps, never()).createPendingOrder(any(), any(), any(), any());
+		verify(paymentService, never()).processPayment(any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void sameIntentFromAnotherCartWithAnotherTotalDoesNotFailTheWaitingOrder() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("99.00"));
+		order.setShoppingCartCode("cart-2");
+
+		assertThrows(PaymentIntentInUseException.class,
+				() -> service.processOrder(order, customer, items, summary, payment, store));
+
+		verify(steps, never()).reconcileUnpaidOrder(any(), any(), any());
+	}
+
+	@Test
+	void changedLinesWithTheSameTotalSupersedeTheWaitingOrderInsteadOfResumingIt() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("10.00"));
+		List<ShoppingCartItem> otherLines = Collections.singletonList(line("sku-2", 1));
+		when(steps.createPendingOrder(any(Order.class), eq(customer), eq(otherLines), isNull())).thenAnswer(inv -> {
+			Order o = inv.getArgument(0);
+			o.setId(42L);
+			return o;
+		});
+		when(paymentService.processPayment(customer, store, payment, otherLines, order)).thenThrow(
+				new ServiceException(ServiceException.EXCEPTION_PAYMENT_DECLINED, "card declined"));
+
+		assertThrows(ServiceException.class,
+				() -> service.processOrder(order, customer, otherLines, summary, payment, store));
+
+		// the waiting order returns its own reserved lines; the decline returns the
+		// new order's lines, so every unit of stock goes back exactly once
+		InOrder sequence = inOrder(steps);
+		sequence.verify(steps).reconcileUnpaidOrder(eq(7L), anyString(), eq(800L));
+		sequence.verify(steps).createPendingOrder(order, customer, otherLines, null);
+		sequence.verify(steps).markPaymentFailed(eq(42L), eq(otherLines), anyString(), eq(900L));
+	}
+
+	@Test
+	void theCartIsPassedToTheModuleToCheckThePaymentIntent() throws Exception {
+		payWithIntent("pi_new");
+		when(paymentService.processPayment(customer, store, payment, items, order)).thenReturn(new Transaction());
+
+		service.processOrder(order, customer, items, summary, payment, store);
+
+		assertEquals("cart-1", payment.getPaymentMetaData().get(Stripe3Payment.META_CART_CODE));
 	}
 
 	@Test

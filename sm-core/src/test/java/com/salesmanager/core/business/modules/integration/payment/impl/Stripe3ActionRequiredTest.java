@@ -1,6 +1,7 @@
 package com.salesmanager.core.business.modules.integration.payment.impl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,6 +21,7 @@ import com.salesmanager.core.model.payments.PaymentAttempt;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.reference.currency.Currency;
 import com.salesmanager.core.model.system.IntegrationConfiguration;
+import com.salesmanager.core.modules.integration.IntegrationException;
 import com.salesmanager.core.modules.integration.PaymentOutcomeUnknownException;
 import com.stripe.exception.IdempotencyException;
 import com.stripe.exception.StripeException;
@@ -56,6 +58,7 @@ class Stripe3ActionRequiredTest {
 				pi.setClientSecret(id + "_secret_x");
 				pi.setAmount(1000L);
 				pi.setAmountCapturable("requires_capture".equals(status) ? 1000L : 0L);
+				pi.setMetadata(Collections.singletonMap("cart_code", "cart-1"));
 				return pi;
 			}
 
@@ -97,6 +100,31 @@ class Stripe3ActionRequiredTest {
 				configuration, null);
 
 		assertEquals("succeeded", tx.getTransactionDetails().get("TRNAPPROVED"));
+		assertEquals(1, captures.get());
+	}
+
+	@Test
+	void intentStartedForAnotherCartIsDeclinedBeforeItsSecretOrMoneyIsTouched() {
+		// a checkout of cart-2 sends the PaymentIntent created for cart-1
+		payment.getPaymentMetaData().put(Stripe3Payment.META_CART_CODE, "cart-2");
+
+		IntegrationException thrown = assertThrows(IntegrationException.class,
+				() -> returning("requires_action").authorizeAndCapture(store, null, null, BigDecimal.TEN, payment,
+						configuration, null));
+
+		// a decline, not "action required": the other cart's client secret is not handed out
+		assertFalse(thrown instanceof PaymentActionRequiredException);
+		assertEquals(IntegrationException.EXCEPTION_PAYMENT_DECLINED, thrown.getExceptionType());
+		assertEquals(0, captures.get());
+	}
+
+	@Test
+	void intentOfTheSameCartIsCaptured() throws Exception {
+		payment.getPaymentMetaData().put(Stripe3Payment.META_CART_CODE, "cart-1");
+
+		returning("requires_capture").authorizeAndCapture(store, null, null, BigDecimal.TEN, payment, configuration,
+				null);
+
 		assertEquals(1, captures.get());
 	}
 

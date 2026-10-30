@@ -38,6 +38,8 @@ import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.TransactionService;
 import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
 import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentIntentInUseException;
+import com.salesmanager.core.business.modules.integration.payment.impl.Stripe3Payment;
 import com.salesmanager.core.business.services.shipping.ShippingService;
 import com.salesmanager.core.business.services.shoppingcart.ShoppingCartService;
 import com.salesmanager.core.business.services.tax.TaxService;
@@ -163,10 +165,13 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	}
     	// A checkout retried after a 3-D Secure challenge carries the same PaymentIntent:
     	// continue the order kept open for it instead of reserving the stock again.
-    	PaymentAttempt attempt = attemptAwaitingCustomerAction(order, payment, store);
-    	if (attempt != null) {
-    		order = orderRepository.findById(attempt.getOrderId()).orElseThrow(
-    				() -> new ServiceException(ServiceException.EXCEPTION_ERROR, "Order of the resumed payment not found"));
+    	PaymentAttempt attempt = null;
+    	Resume resume = attemptAwaitingCustomerAction(order, items, payment, store);
+    	if (resume != null) {
+    		// the waiting order was placed from this same cart with the same lines and
+    		// total, so the current items are the lines its stock was reserved for
+    		attempt = resume.attempt;
+    		order = resume.order;
     		LOGGER.info("Order {} resumes payment attempt {} after customer action", order.getId(),
     				attempt.getAttemptRef());
     	} else {
@@ -188,6 +193,10 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     		payment.setPaymentMetaData(new HashMap<>());
     	}
     	payment.getPaymentMetaData().put(PaymentAttempt.META_ATTEMPT_REF, attempt.getAttemptRef());
+    	if (StringUtils.isNotBlank(order.getShoppingCartCode())) {
+    		// lets the module check that a PaymentIntent was started for this cart
+    		payment.getPaymentMetaData().put(Stripe3Payment.META_CART_CODE, order.getShoppingCartCode());
+    	}
 
     	// 3. charge (outside of any write that could still roll back the order)
     	Transaction processTransaction;
@@ -265,14 +274,32 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	}
     }
 
+    /** A waiting order and its attempt that a retried checkout continues. */
+    private static final class Resume {
+    	final PaymentAttempt attempt;
+    	final Order order;
+
+    	Resume(PaymentAttempt attempt, Order order) {
+    		this.attempt = attempt;
+    		this.order = order;
+    	}
+    }
+
     /**
-     * The open attempt of an earlier checkout that is waiting for the customer to act on
-     * the same PaymentIntent, or null. It is resumed only while its order is still
-     * PAYMENT_PENDING in this store for the same amount. Otherwise that order is failed
-     * (its stock returned) before a new one is placed, so at most one open order ever
-     * uses a PaymentIntent and the reconciler cannot confirm two orders for one payment.
+     * The open attempt (and its order) of an earlier checkout that is waiting for the
+     * customer to act on the same PaymentIntent, or null.
+     *
+     * The waiting order must come from the same cart as this checkout; otherwise the
+     * checkout is refused with {@link PaymentIntentInUseException} and the waiting
+     * order is not touched, so nobody can take over or cancel another customer's
+     * order with its PaymentIntent id. From the same cart, it is resumed only while
+     * still PAYMENT_PENDING with the same total and the same lines (sku and quantity).
+     * Otherwise it is failed (its own stock returned) before a new order is placed, so
+     * at most one open order ever uses a PaymentIntent and the reconciler cannot
+     * confirm two orders for one payment.
      */
-    private PaymentAttempt attemptAwaitingCustomerAction(Order order, Payment payment, MerchantStore store) {
+    private Resume attemptAwaitingCustomerAction(Order order, List<ShoppingCartItem> items, Payment payment,
+    		MerchantStore store) throws ServiceException {
     	String intentId = knownGatewayRef(payment);
     	if (intentId == null) {
     		return null;
@@ -283,16 +310,42 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     			|| !store.getId().equals(previous.getMerchantId())) {
     		return null;
     	}
-    	Order waiting = orderRepository.findById(previous.getOrderId()).orElse(null);
+    	// fetched with its lines, scoped to the store
+    	Order waiting = orderRepository.findOne(previous.getOrderId(), store.getId());
+    	if (waiting != null && !sameCart(waiting, order)) {
+    		LOGGER.warn("Checkout of cart {} refused: PaymentIntent {} is held by order {} of another cart",
+    				order.getShoppingCartCode(), intentId, waiting.getId());
+    		throw new PaymentIntentInUseException(intentId);
+    	}
     	if (waiting != null && waiting.getStatus() == OrderStatus.PAYMENT_PENDING && waiting.getTotal() != null
-    			&& order.getTotal() != null && waiting.getTotal().compareTo(order.getTotal()) == 0) {
-    		return previous;
+    			&& order.getTotal() != null && waiting.getTotal().compareTo(order.getTotal()) == 0
+    			&& sameLines(waiting, items)) {
+    		return new Resume(previous, waiting);
     	}
     	LOGGER.info("Order {} waiting on PaymentIntent {} is superseded by a new checkout", previous.getOrderId(),
     			intentId);
     	orderCheckoutSteps.reconcileUnpaidOrder(previous.getOrderId(), "superseded by a new checkout",
     			previous.getId());
     	return null;
+    }
+
+    private static boolean sameCart(Order waiting, Order order) {
+    	return StringUtils.isNotBlank(order.getShoppingCartCode())
+    			&& order.getShoppingCartCode().equals(waiting.getShoppingCartCode());
+    }
+
+    /** True when the cart lines are the order's lines: the same skus with the same quantities. */
+    static boolean sameLines(Order waiting, List<ShoppingCartItem> items) {
+    	Map<String, Integer> ordered = new HashMap<>();
+    	for (OrderProduct product : waiting.getOrderProducts()) {
+    		ordered.merge(StringUtils.defaultString(product.getSku()), product.getProductQuantity(), Integer::sum);
+    	}
+    	Map<String, Integer> inCart = new HashMap<>();
+    	for (ShoppingCartItem item : items) {
+    		inCart.merge(StringUtils.defaultString(item.getSku()),
+    				item.getQuantity() == null ? 0 : item.getQuantity(), Integer::sum);
+    	}
+    	return ordered.equals(inCart);
     }
 
     private static PaymentAttempt newAttempt(Order order, Payment payment, MerchantStore store) {
