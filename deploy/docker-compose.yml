@@ -44,6 +44,7 @@ services:
         -Dshopizer.metrics.scrape-cidrs=${BACKEND_SUBNET:-172.28.0.0/16}
         -Dconfig.reconciliation.pendingOrders.graceMinutes=${RECONCILE_GRACE_MINUTES:-15}
         -Dconfig.reconciliation.pendingOrders.delayMs=${RECONCILE_DELAY_MS:-300000}
+        -Dshopizer.cors.allowed-origins=http://localhost:${STOREFRONT_PORT:-3000},http://localhost:${ADMIN_PORT:-4200}
       STRIPE_TEST_SECRET_KEY: ${STRIPE_TEST_SECRET_KEY:-}
       # one JSON object per log line, with requestId; unset for the readable pattern
       LOG_FORMAT: ${LOG_FORMAT:-json}
