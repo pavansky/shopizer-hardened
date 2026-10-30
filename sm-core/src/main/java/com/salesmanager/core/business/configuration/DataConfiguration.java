@@ -87,6 +87,20 @@ public class DataConfiguration {
     @Value("${hibernate.query.fail_on_pagination_over_collection_fetch:false}")
     private String failOnCollectionFetchPagination;
 
+    /**
+     * Spring's HibernateJpaVendorAdapter defaults to DELAYED_ACQUISITION_AND_HOLD: once a
+     * request's EntityManager touched the database it kept the JDBC connection until the
+     * EntityManager closed. With open-in-view that is the end of the request, so a checkout
+     * held a pooled connection while it waited on the payment gateway. Releasing after each
+     * transaction (and after each read outside one) returns it to the pool in between.
+     * Spring still marks the connection read-only for read-only transactions. When the
+     * connection is already back in the pool at cleanup, Spring skips its own reset and
+     * Hikari restores the read-only flag and isolation level when it takes the connection
+     * back. No transaction in the code sets an isolation level.
+     */
+    @Value("${hibernate.connection.handling_mode:DELAYED_ACQUISITION_AND_RELEASE_AFTER_TRANSACTION}")
+    private String connectionHandlingMode;
+
     @Bean
     public HikariDataSource dataSource() {
     	HikariDataSource dataSource = DataSourceBuilder.create().type(HikariDataSource.class)
@@ -137,6 +151,7 @@ public class DataConfiguration {
         hibernateProperties.setProperty("hibernate.generate_statistics", "false");
         hibernateProperties.setProperty("hibernate.default_batch_fetch_size", batchFetchSize);
         hibernateProperties.setProperty("hibernate.query.fail_on_pagination_over_collection_fetch", failOnCollectionFetchPagination);
+        hibernateProperties.setProperty("hibernate.connection.handling_mode", connectionHandlingMode);
         // hibernateProperties.setProperty("hibernate.globally_quoted_identifiers", "true");
         return hibernateProperties;
     }
