@@ -1,0 +1,33 @@
+# Demo routing: every alert is emailed to Mailpit (http://localhost:8025), pages and tickets
+# to different mailboxes. In production the page route goes to PagerDuty or Opsgenie.
+global:
+  smtp_smarthost: mailpit:1025
+  smtp_from: alertmanager@shopizer.local
+  smtp_require_tls: false
+
+route:
+  receiver: ops-tickets
+  group_by: [alertname, store]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+  routes:
+    - matchers: [ 'severity="page"' ]
+      receiver: on-call
+      repeat_interval: 1h
+    - matchers: [ 'alertname="Watchdog"' ]
+      receiver: heartbeat
+      repeat_interval: 2h
+
+receivers:
+  - name: on-call
+    email_configs:
+      - to: on-call@shopizer.local
+        send_resolved: true
+  - name: ops-tickets
+    email_configs:
+      - to: ops-tickets@shopizer.local
+        send_resolved: true
+  - name: heartbeat
+    email_configs:
+      - to: alert-heartbeat@shopizer.local

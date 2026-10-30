@@ -157,6 +157,129 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 7,
+      "title": "Checkout success rate by store (HTTP 200 of all checkouts, 5m)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (store) (rate(http_server_requests_seconds_count{uri=~\".*/cart/\\\\{code\\\\}/checkout\",status=\"200\"}[5m])) / sum by (store) (rate(http_server_requests_seconds_count{uri=~\".*/cart/\\\\{code\\\\}/checkout\"}[5m]))",
+          "legendFormat": "{{store}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Payment outcomes by store and module (last 1h)",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (store, module, outcome) (increase(shopizer_payment_outcomes_total[1h]))",
+          "legendFormat": "{{store}} {{module}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Hours since the last good backup (alert at 7)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(time() - shopizer_backup_last_success_timestamp_seconds) / 3600",
+          "legendFormat": "backup age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 7
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Orders waiting in PAYMENT_REVIEW by store",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "shopizer_orders_payment_review",
+          "legendFormat": "{{store}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      }
     }
   ]
 }

@@ -1,6 +1,8 @@
 # Full Shopizer demo stack: one command, production-shaped, runs offline.
 #   cp deploy/.env.example deploy/.env && docker compose -f deploy/docker-compose.yml up -d --build
 # Expects the admin and storefront forks cloned next to this repository (see deploy/README.md).
+# A second stack on the same machine (CI, rehearsal) needs its own project name, ports,
+# BACKEND_SUBNET and IMAGE_TAG; see .env.example.
 name: shopizer
 
 x-logging: &logging
@@ -28,7 +30,7 @@ services:
 
   api:
     build: { context: .., dockerfile: Dockerfile }
-    image: shopizer-api:local
+    image: shopizer-api:${IMAGE_TAG:-local}
     depends_on:
       db: { condition: service_healthy }
     environment:
@@ -39,10 +41,12 @@ services:
       JAVA_TOOL_OPTIONS: >-
         -Ddb.jdbcUrl=jdbc:mysql://db:3306/SALESMANAGER?useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true
         -Ddb.user=shopizer -Ddb.password=${DB_PASSWORD}
-        -Dshopizer.metrics.scrape-cidrs=172.28.0.0/16
+        -Dshopizer.metrics.scrape-cidrs=${BACKEND_SUBNET:-172.28.0.0/16}
         -Dconfig.reconciliation.pendingOrders.graceMinutes=${RECONCILE_GRACE_MINUTES:-15}
         -Dconfig.reconciliation.pendingOrders.delayMs=${RECONCILE_DELAY_MS:-300000}
       STRIPE_TEST_SECRET_KEY: ${STRIPE_TEST_SECRET_KEY:-}
+      # one JSON object per log line, with requestId; unset for the readable pattern
+      LOG_FORMAT: ${LOG_FORMAT:-json}
       # order emails go to Mailpit; open http://localhost:8025 to read them
       EMAIL_SENDER: default
       SMTP_PROTOCOL: smtp
@@ -51,7 +55,10 @@ services:
       SMTP_AUTH: "false"
       SMTP_STARTTLS: "false"
     ports: [ "${API_PORT:-8080}:8080" ]
-    volumes: [ "cms-files:/files" ]
+    volumes:
+      - "cms-files:/files"
+      # written by the backup service; read for shopizer_backup_last_success_timestamp_seconds
+      - "backup-status:/backup-status:ro"
     restart: unless-stopped
     stop_grace_period: 40s
     logging: *logging
@@ -59,7 +66,7 @@ services:
 
   admin:
     build: { context: "${ADMIN_DIR:-../../shopizer-admin-hardened}", dockerfile: docker/Dockerfile-all }
-    image: shopizer-admin:local
+    image: shopizer-admin:${IMAGE_TAG:-local}
     environment:
       APP_BASE_URL: http://localhost:${API_PORT:-8080}/api
       APP_SHIPPING_URL: http://localhost:9090/api
@@ -73,7 +80,7 @@ services:
 
   storefront:
     build: { context: "${STOREFRONT_DIR:-../../shopizer-shop-hardened}", dockerfile: Dockerfile }
-    image: shopizer-storefront:local
+    image: shopizer-storefront:${IMAGE_TAG:-local}
     environment:
       APP_API_URL: http://localhost:${API_PORT:-8080}/api
       APP_MERCHANT: DEFAULT
@@ -92,11 +99,13 @@ services:
     environment:
       MYSQL_PWD: ${DB_ROOT_PASSWORD}
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-21600}
+      BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-300}
       BACKUP_KEEP: ${BACKUP_KEEP:-14}
     volumes:
       - "./backup/backup.sh:/backup.sh:ro"
       - "./backup/dumps:/dumps"
-    entrypoint: ["sh", "/backup.sh"]
+      - "backup-status:/status"
+    entrypoint: ["bash", "/backup.sh"]
     restart: unless-stopped
     logging: *logging
     networks: [backend]
@@ -108,6 +117,18 @@ services:
     logging: *logging
     networks: [backend]
 
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - "./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"
+      - "alertmanager-data:/alertmanager"
+    ports: [ "${ALERTMANAGER_PORT:-9093}:9093" ]
+    depends_on: [mailpit]
+    restart: unless-stopped
+    logging: *logging
+    networks: [backend]
+
   prometheus:
     image: prom/prometheus:v3.5.0
     volumes:
@@ -115,6 +136,7 @@ services:
       - "./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro"
       - "prom-data:/prometheus"
     ports: [ "${PROMETHEUS_PORT:-9090}:9090" ]
+    depends_on: [alertmanager]
     restart: unless-stopped
     logging: *logging
     networks: [backend]
@@ -138,8 +160,10 @@ volumes:
   db-data:
   cms-files:
   prom-data:
+  backup-status:
+  alertmanager-data:
 
 networks:
   backend:
-    ipam: { config: [ { subnet: 172.28.0.0/16 } ] }
+    ipam: { config: [ { subnet: "${BACKEND_SUBNET:-172.28.0.0/16}" } ] }
   frontend:
