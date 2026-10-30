@@ -19,6 +19,7 @@ import org.springframework.mock.web.MockHttpServletResponse;
 
 import com.salesmanager.core.business.services.catalog.product.ProductService;
 import com.salesmanager.core.business.services.catalog.product.review.ProductReviewService;
+import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.model.catalog.product.Product;
 import com.salesmanager.core.model.catalog.product.review.ProductReview;
 import com.salesmanager.core.model.customer.Customer;
@@ -36,6 +37,7 @@ class ProductReviewApiTest {
   @Mock private ProductReviewService productReviewService;
   @Mock private CustomerFacade customerFacade;
   @Mock private ProductService productService;
+  @Mock private CustomerService customerService;
   @InjectMocks private ProductReviewApi api;
 
   private final MerchantStore store = new MerchantStore();
@@ -61,6 +63,7 @@ class ProductReviewApiTest {
   @Test
   void createIgnoresBodyCustomerIdOnAuthRoute() throws Exception {
     when(customerFacade.getCustomerByUserName("alice", store)).thenReturn(customer(7L));
+    when(productService.findOne(5L, store)).thenReturn(new Product());
     PersistableProductReview review = new PersistableProductReview();
     review.setCustomerId(99L); // someone else
     review.setRating(4d);
@@ -176,5 +179,56 @@ class ProductReviewApiTest {
 
     assertEquals(404, response.getStatus());
     verify(productCommonFacade, never()).saveOrUpdateReview(any(), any(), any());
+  }
+
+  @Test
+  void createOnAnotherStoresProductReturns404AndDoesNotSave() throws Exception {
+    when(productService.findOne(5L, store)).thenReturn(null);
+    PersistableProductReview review = new PersistableProductReview();
+    review.setCustomerId(7L);
+    review.setRating(4d);
+    MockHttpServletResponse response = new MockHttpServletResponse();
+
+    api.create(5L, review, store, language,
+        new MockHttpServletRequest("POST", "/api/v1/private/products/5/reviews"), response);
+
+    assertEquals(404, response.getStatus());
+    verify(productCommonFacade, never()).saveOrUpdateReview(any(), any(), any());
+  }
+
+  @Test
+  void createByAReviewerOfAnotherStoreReturns404AndDoesNotSave() throws Exception {
+    when(productService.findOne(5L, store)).thenReturn(new Product());
+    when(customerService.getById(42L, store)).thenReturn(null);
+    PersistableProductReview review = new PersistableProductReview();
+    review.setCustomerId(42L);
+    review.setRating(4d);
+    MockHttpServletResponse response = new MockHttpServletResponse();
+
+    api.create(5L, review, store, language,
+        new MockHttpServletRequest("POST", "/api/v1/private/products/5/reviews"), response);
+
+    assertEquals(404, response.getStatus());
+    verify(productCommonFacade, never()).saveOrUpdateReview(any(), any(), any());
+  }
+
+  @Test
+  void createIgnoresAReviewIdInTheBody() throws Exception {
+    when(productService.findOne(5L, store)).thenReturn(new Product());
+    when(customerService.getById(7L, store)).thenReturn(customer(7L));
+    PersistableProductReview review = new PersistableProductReview();
+    review.setId(11L); // another review, possibly of another store
+    review.setCustomerId(7L);
+    review.setRating(4d);
+    Long[] idAtSave = new Long[] {-1L};
+    org.mockito.Mockito.doAnswer(inv -> {
+      idAtSave[0] = ((PersistableProductReview) inv.getArgument(0)).getId();
+      return null;
+    }).when(productCommonFacade).saveOrUpdateReview(any(), eq(store), eq(language));
+
+    api.create(5L, review, store, language,
+        new MockHttpServletRequest("POST", "/api/v1/private/products/5/reviews"), new MockHttpServletResponse());
+
+    assertEquals(null, idAtSave[0]);
   }
 }

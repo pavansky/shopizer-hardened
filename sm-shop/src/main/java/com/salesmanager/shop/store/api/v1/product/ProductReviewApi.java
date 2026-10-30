@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 
 import com.salesmanager.core.business.services.catalog.product.ProductService;
 import com.salesmanager.core.business.services.catalog.product.review.ProductReviewService;
+import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.model.catalog.product.Product;
 import com.salesmanager.core.model.catalog.product.review.ProductReview;
 import com.salesmanager.core.model.customer.Customer;
@@ -48,6 +49,8 @@ public class ProductReviewApi {
   @Inject private ProductReviewService productReviewService;
 
   @Inject private CustomerFacade customerFacade;
+
+  @Inject private CustomerService customerService;
 
   /**
    * On customer facing /auth/ routes the reviewer is always the authenticated
@@ -106,8 +109,24 @@ public class ProductReviewApi {
     // The product comes from the path, not the body, so the duplicate check
     // below looks at the product actually being reviewed.
     review.setProductId(id);
+    // A create never updates: an id in the body would turn the save into an
+    // update of that review, whatever its store.
+    review.setId(null);
 
     try {
+      // Only products of the requested store, and on /private/ routes only a
+      // reviewer of the requested store. Anything else is not found.
+      if (productService.findOne(id, merchantStore) == null) {
+        response.sendError(404, "Product id " + id + " does not exists");
+        return null;
+      }
+      if (authCustomerId == null
+          && (review.getCustomerId() == null
+              || customerService.getById(review.getCustomerId(), merchantStore) == null)) {
+        response.sendError(404, "Customer id " + review.getCustomerId() + " does not exists");
+        return null;
+      }
+
       // rating already exist
       ProductReview prodReview =
           productReviewService.getByProductAndCustomer(
