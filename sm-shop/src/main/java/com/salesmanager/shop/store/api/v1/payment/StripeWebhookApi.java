@@ -41,12 +41,13 @@ import springfox.documentation.annotations.ApiIgnore;
  * endpoint only shortens the time an order waits in PAYMENT_PENDING.
  *
  * It also records what only Stripe knows about: refunds issued from the Stripe
- * Dashboard (charge.refunded) go into the ledger, and disputes
+ * Dashboard (charge.refunded, and charge.refund.updated for a refund that was
+ * still pending when the charge event came) go into the ledger, and disputes
  * (charge.dispute.created, charge.dispute.closed) go into the order history.
  *
  * Configure in Stripe: endpoint https://<host>/api/v1/webhooks/stripe/<storeCode>,
  * events payment_intent.succeeded, payment_intent.payment_failed,
- * payment_intent.canceled, charge.refunded, charge.dispute.created and
+ * payment_intent.canceled, charge.refunded, charge.refund.updated, charge.dispute.created and
  * charge.dispute.closed, and store the signing secret as the stripe3 module key
  * "webhookSecret" for that store.
  */
@@ -59,6 +60,7 @@ public class StripeWebhookApi {
 	static final String MODULE = "stripe3";
 	static final String SECRET_KEY = "webhookSecret";
 	static final String CHARGE_REFUNDED = "charge.refunded";
+	static final String REFUND_UPDATED = "charge.refund.updated";
 	static final String DISPUTE_CREATED = "charge.dispute.created";
 	static final String DISPUTE_CLOSED = "charge.dispute.closed";
 
@@ -105,21 +107,26 @@ public class StripeWebhookApi {
 		String type = event.path("type").asText();
 		JsonNode object = event.path("data").path("object");
 		boolean intentEvent = type.startsWith("payment_intent.");
-		if (!intentEvent && !CHARGE_REFUNDED.equals(type) && !DISPUTE_CREATED.equals(type)
+		boolean refundEvent = REFUND_UPDATED.equals(type);
+		if (!intentEvent && !refundEvent && !CHARGE_REFUNDED.equals(type) && !DISPUTE_CREATED.equals(type)
 				&& !DISPUTE_CLOSED.equals(type)) {
 			return ResponseEntity.ok("ignored");
 		}
 		// a PaymentIntent event names the intent; charge and dispute events name the intent
-		// and the charge (legacy Charges payments only have the charge)
+		// and the charge (legacy Charges payments only have the charge); a refund event's
+		// object is the refund, which names both as well
+		String chargeId = text(object, type.startsWith("charge.dispute.") || refundEvent ? "charge" : "id");
 		PaymentAttempt attempt = intentEvent ? attempt(text(object, "id"))
-				: attempt(text(object, "payment_intent"), text(object, type.startsWith("charge.dispute.") ? "charge" : "id"));
+				: attempt(text(object, "payment_intent"), chargeId);
 		if (attempt == null || attempt.getOrderId() == null || !store.getId().equals(attempt.getMerchantId())) {
 			// not ours (or another store's): acknowledge so Stripe stops retrying
 			return ResponseEntity.ok("no matching payment attempt");
 		}
 
-		if (CHARGE_REFUNDED.equals(type)) {
-			return refunded(store, attempt, text(object, "id"));
+		if (CHARGE_REFUNDED.equals(type) || refundEvent) {
+			// the same path for both: the charge's refunds are listed from Stripe and
+			// recorded once each by refund id, so a late success is picked up here
+			return refunded(store, attempt, chargeId);
 		}
 		if (!intentEvent) {
 			return dispute(attempt, type, object);

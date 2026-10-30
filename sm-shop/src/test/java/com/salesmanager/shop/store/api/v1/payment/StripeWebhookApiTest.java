@@ -168,6 +168,21 @@ class StripeWebhookApiTest {
 	}
 
 	@Test
+	void refundThatSucceedsLaterIsRecordedThroughTheSamePath() throws Exception {
+		// charge.refund.updated carries the refund: its charge is listed from Stripe again
+		when(attempts.findByGatewayRef("pi_123")).thenReturn(attempt(1));
+		List<Transaction> fromStripe = Collections.singletonList(new Transaction());
+		when(stripe.succeededRefunds(any(), eq("ch_9"))).thenReturn(fromStripe);
+		when(recorder.recordRefunds(42L, fromStripe, "Stripe")).thenReturn(new GatewayEventRecorder.RefundResult());
+
+		deliver("{\"id\":\"evt_5\",\"type\":\"charge.refund.updated\",\"data\":{\"object\":"
+				+ "{\"id\":\"re_1\",\"charge\":\"ch_9\",\"payment_intent\":\"pi_123\",\"status\":\"succeeded\"}}}");
+
+		verify(recorder).recordRefunds(42L, fromStripe, "Stripe");
+		verify(reconciler, never()).reconcileOrder(anyLong());
+	}
+
+	@Test
 	void disputeCreatedIsWrittenToTheOrderHistory() throws Exception {
 		when(attempts.findByGatewayRef("pi_123")).thenReturn(attempt(1));
 		when(recorder.recordDispute(eq(42L), eq("dp_1"), eq("opened"), anyString(), eq(true))).thenReturn(true);
