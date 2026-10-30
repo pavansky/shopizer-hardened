@@ -6,6 +6,9 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Semaphore;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -16,9 +19,11 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import com.salesmanager.core.business.constants.Constants;
+import com.salesmanager.core.business.modules.integration.payment.impl.MoneyOrderPayment;
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.services.order.OrderService;
 import com.salesmanager.core.business.services.order.OrderStatusTransitions;
@@ -90,6 +95,51 @@ public class PaymentServiceImpl implements PaymentService {
 	
 	@Inject
 	private Encryption encryption;
+
+	/**
+	 * Gateway calls allowed at the same time per payment module on this instance.
+	 * Kept below the database pool (15 connections): with open-in-view a checkout
+	 * waiting on the gateway still holds the connection it used to reserve stock,
+	 * so a slow gateway must not be able to take every connection and stop browsing.
+	 */
+	@Value("${config.payment.bulkhead.maxConcurrent:10}")
+	private int bulkheadPermits = 10;
+
+	/** Seconds a client is told to wait before retrying when the bulkhead is full. */
+	@Value("${config.payment.bulkhead.retryAfterSeconds:2}")
+	private int bulkheadRetryAfterSeconds = 2;
+
+	private final ConcurrentMap<String, Semaphore> bulkheads = new ConcurrentHashMap<>();
+
+	/** One call into a payment module. */
+	@FunctionalInterface
+	interface GatewayCall<T> {
+		T call() throws ServiceException;
+	}
+
+	/**
+	 * Runs a payment module call inside that module's bulkhead. When every permit is
+	 * taken the call fails at once with PaymentGatewayBusyException, before the module
+	 * runs, so a rejected call never reaches the gateway. A permit is only released by
+	 * the call that took it, after the module returned or threw. The money order module
+	 * makes no network call and is not limited.
+	 */
+	<T> T callGateway(String moduleCode, PaymentModule module, GatewayCall<T> call) throws ServiceException {
+		if (module instanceof MoneyOrderPayment) {
+			return call.call();
+		}
+		Semaphore permits = bulkheads.computeIfAbsent(moduleCode, code -> new Semaphore(bulkheadPermits));
+		if (!permits.tryAcquire()) {
+			LOGGER.warn("Payment gateway {} bulkhead full ({} calls in flight); call rejected before reaching the gateway",
+					moduleCode, bulkheadPermits);
+			throw new PaymentGatewayBusyException(moduleCode, bulkheadRetryAfterSeconds);
+		}
+		try {
+			return call.call();
+		} finally {
+			permits.release();
+		}
+	}
 	
 	@Override
 	public List<IntegrationModule> getPaymentMethods(MerchantStore store) throws ServiceException {
@@ -371,12 +421,16 @@ public class PaymentServiceImpl implements PaymentService {
 		}
 		
 		Transaction transaction = null;
+		String moduleCode = payment.getModuleName();
 		if(transactionType == TransactionType.AUTHORIZE)  {
-			transaction = module.authorize(store, customer, items, amount, payment, configuration, integrationModule);
+			transaction = callGateway(moduleCode, module,
+					() -> module.authorize(store, customer, items, amount, payment, configuration, integrationModule));
 		} else if(transactionType == TransactionType.AUTHORIZECAPTURE)  {
-			transaction = module.authorizeAndCapture(store, customer, items, amount, payment, configuration, integrationModule);
+			transaction = callGateway(moduleCode, module,
+					() -> module.authorizeAndCapture(store, customer, items, amount, payment, configuration, integrationModule));
 		} else if(transactionType == TransactionType.INIT)  {
-			transaction = module.initTransaction(store, customer, amount, payment, configuration, integrationModule);
+			transaction = callGateway(moduleCode, module,
+					() -> module.initTransaction(store, customer, amount, payment, configuration, integrationModule));
 		}
 
 
@@ -444,7 +498,8 @@ public class PaymentServiceImpl implements PaymentService {
 			throw new ServiceException(ServiceException.EXCEPTION_VALIDATION,
 					"No capturable transaction for order id " + order.getId(), "message.payment.error");
 		}
-		Transaction transaction = module.capture(store, customer, order, trx, configuration, integrationModule);
+		Transaction transaction = callGateway(order.getPaymentModuleCode(), module,
+				() -> module.capture(store, customer, order, trx, configuration, integrationModule));
 		if(transaction == null) {
 			throw new ServiceException("Payment module " + order.getPaymentModuleCode() + " returned no capture transaction");
 		}
@@ -495,7 +550,8 @@ public class PaymentServiceImpl implements PaymentService {
 
 		boolean partial = amount.compareTo(remaining) < 0;
 
-		Transaction transaction = paymentModule.refund(partial, store, refundable, order, amount, configuration, integrationModule);
+		Transaction transaction = callGateway(moduleCode, paymentModule,
+				() -> paymentModule.refund(partial, store, refundable, order, amount, configuration, integrationModule));
 		if(transaction == null) {
 			throw new ServiceException("Payment module " + moduleCode + " returned no refund transaction");
 		}
@@ -723,7 +779,8 @@ public class PaymentServiceImpl implements PaymentService {
 		
 		IntegrationModule integrationModule = getPaymentMethodByCode(store,payment.getModuleName());
 
-		return module.initTransaction(store, customer, amount, payment, configuration, integrationModule);
+		return callGateway(order.getPaymentModuleCode(), module,
+				() -> module.initTransaction(store, customer, amount, payment, configuration, integrationModule));
 	}
 
 	@Override
@@ -761,7 +818,8 @@ public class PaymentServiceImpl implements PaymentService {
 		
 		IntegrationModule integrationModule = getPaymentMethodByCode(store,payment.getModuleName());
 		
-		Transaction transaction = module.initTransaction(store, customer, amount, payment, configuration, integrationModule);
+		Transaction transaction = callGateway(payment.getModuleName(), module,
+				() -> module.initTransaction(store, customer, amount, payment, configuration, integrationModule));
 		
 		transactionService.save(transaction);
 

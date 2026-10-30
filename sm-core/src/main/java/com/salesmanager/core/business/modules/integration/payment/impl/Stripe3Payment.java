@@ -10,6 +10,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
@@ -32,6 +33,7 @@ import com.stripe.exception.ApiConnectionException;
 import com.stripe.exception.ApiException;
 import com.stripe.exception.AuthenticationException;
 import com.stripe.exception.CardException;
+import com.stripe.exception.IdempotencyException;
 import com.stripe.exception.InvalidRequestException;
 import com.stripe.exception.StripeException;
 import com.stripe.model.PaymentIntent;
@@ -39,6 +41,7 @@ import com.stripe.model.Refund;
 import com.stripe.net.RequestOptions;
 import com.stripe.param.PaymentIntentCaptureParams;
 import com.stripe.param.PaymentIntentCreateParams;
+import com.stripe.param.RefundListParams;
 
 // import com.stripe.exception.APIConnectionException;
 
@@ -48,6 +51,9 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 	private final static String AUTHORIZATION = "Authorization";
 	private final static String TRANSACTION = "Transaction";
+
+	/** Payment metadata key of the cart a PaymentIntent is created for; sent to Stripe as cart_code. */
+	public static final String META_CART_CODE = "cartCode";
 
 
 	@Override
@@ -76,16 +82,25 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 			RequestOptions requestOptions = requestOptions(apiKey);
 
-			PaymentIntentCreateParams createParams = new PaymentIntentCreateParams.Builder()
+			// No redirect-based methods: the storefront confirms with redirect 'if_required' and
+			// has no return page to resume from. Cards run 3-D Secure in place when the issuer asks.
+			PaymentIntentCreateParams.Builder create = new PaymentIntentCreateParams.Builder()
 					.setCurrency(store.getCurrency().getCode())
 					.setAmount(minorAmount)
 					.setCaptureMethod(PaymentIntentCreateParams.CaptureMethod.MANUAL)
-					.build();
+					.setAutomaticPaymentMethods(PaymentIntentCreateParams.AutomaticPaymentMethods.builder()
+							.setEnabled(true)
+							.setAllowRedirects(PaymentIntentCreateParams.AutomaticPaymentMethods.AllowRedirects.NEVER)
+							.build());
+			String cartCode = payment.getPaymentMetaData() == null ? null
+					: payment.getPaymentMetaData().get(META_CART_CODE);
+			if (StringUtils.isNotBlank(cartCode)) {
+				create.putMetadata("cart_code", cartCode);
+			}
+			PaymentIntentCreateParams createParams = create.build();
 
 			// Create a PaymentIntent with the order amount and currency
-			PaymentIntent intent = PaymentIntent.create(createParams, requestOptions);
-
-			intent.getClientSecret();
+			PaymentIntent intent = createPaymentIntent(createParams, requestOptions);
 
 			transaction.setAmount(amount);
 			//transaction.setOrder(order);
@@ -178,7 +193,10 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 			RequestOptions requestOptions = requestOptions(apiKey);
 			
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(token, requestOptions);
+			PaymentIntent paymentIntent = retrievePaymentIntent(token, requestOptions);
+
+			checkStartedForCart(paymentIntent, payment);
+			checkConfirmedByCustomer(paymentIntent);
 			
 			transaction.setAmount(amount);
 			//transaction.setOrder(order);
@@ -319,8 +337,10 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			// or replayed capture never takes the money twice.
 			RequestOptions captureOptions = requestOptions(apiKey, attemptRef(payment));
 
-			PaymentIntent paymentIntent = PaymentIntent.retrieve(token, requestOptions);
+			PaymentIntent paymentIntent = retrievePaymentIntent(token, requestOptions);
 
+			checkStartedForCart(paymentIntent, payment);
+			checkConfirmedByCustomer(paymentIntent);
 			checkCapturable(paymentIntent, minorAmount);
 
 			PaymentIntentCaptureParams params =
@@ -329,7 +349,7 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 							.setStatementDescriptorSuffix(statementSuffix(store.getStorename()))
 					.build();
 
-			paymentIntent = paymentIntent.capture(params, captureOptions);
+			paymentIntent = capturePaymentIntent(paymentIntent, params, captureOptions);
 			
 			
 			transaction.setAmount(amount);
@@ -343,8 +363,6 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			transaction.getTransactionDetails().put("MESSAGETEXT", null);
 			
 		} catch (Exception e) {
-
-			e.printStackTrace();
 
 			throw buildException(e);
 	
@@ -415,6 +433,39 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 	}
 	
 	/**
+	 * Payment init records the cart in the PaymentIntent metadata (cart_code). A checkout
+	 * of another cart must not capture it, nor learn its client secret through the
+	 * "action required" answer, so this check runs first. Intents without cart_code
+	 * (created outside the shop) and payments without a cart are not checked.
+	 */
+	static void checkStartedForCart(PaymentIntent paymentIntent, Payment payment) throws IntegrationException {
+		String cartCode = payment.getPaymentMetaData() == null ? null
+				: payment.getPaymentMetaData().get(META_CART_CODE);
+		String intentCart = paymentIntent.getMetadata() == null ? null : paymentIntent.getMetadata().get("cart_code");
+		if (StringUtils.isBlank(cartCode) || StringUtils.isBlank(intentCart) || cartCode.equals(intentCart)) {
+			return;
+		}
+		IntegrationException te = new IntegrationException(
+				"Stripe PaymentIntent " + paymentIntent.getId() + " was started for another cart");
+		te.setExceptionType(IntegrationException.EXCEPTION_PAYMENT_DECLINED);
+		te.setMessageCode("message.payment.declined");
+		te.setErrorCode(IntegrationException.TRANSACTION_EXCEPTION);
+		throw te;
+	}
+
+	/**
+	 * A PaymentIntent the customer has not finished (3-D Secure challenge pending, card
+	 * refused at confirmation, or never confirmed) is "not paid yet", not a decline: the
+	 * customer can still complete it in the browser with the client secret.
+	 */
+	static void checkConfirmedByCustomer(PaymentIntent paymentIntent) throws PaymentActionRequiredException {
+		if (PaymentActionRequiredException.isCustomerActionStatus(paymentIntent.getStatus())) {
+			throw new PaymentActionRequiredException(paymentIntent.getId(), paymentIntent.getClientSecret(),
+					paymentIntent.getStatus());
+		}
+	}
+
+	/**
 	 * Fails with a precise message when the PaymentIntent cannot be captured for the requested amount.
 	 */
 	private void checkCapturable(PaymentIntent paymentIntent, long minorAmount) throws IntegrationException {
@@ -433,7 +484,9 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 	private IntegrationException buildException(Exception ex) {
 
-	if(ex instanceof ApiConnectionException || ex instanceof ApiException) {
+	if(ex instanceof ApiConnectionException || ex instanceof ApiException || ex instanceof IdempotencyException) {
+		// IdempotencyException: a request with the same key is still running at Stripe, so
+		// this one cannot tell what happened either.
 		// Network failure or Stripe server error: the request may have been applied.
 		LOGGER.error("Stripe outcome unknown", ex);
 		return new PaymentOutcomeUnknownException("Stripe did not answer clearly: " + ex.getMessage(), ex);
@@ -622,24 +675,32 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 		return Refund.create(params, requestOptions);
 	}
 
+	/** Connect timeout of every Stripe call, in milliseconds. */
+	@Value("${config.payment.stripe.connectTimeoutMs:3000}")
+	private int connectTimeoutMs = StripeNetwork.DEFAULT_CONNECT_TIMEOUT_MS;
+
+	/** Read timeout of every Stripe call, in milliseconds. */
+	@Value("${config.payment.stripe.readTimeoutMs:15000}")
+	private int readTimeoutMs = StripeNetwork.DEFAULT_READ_TIMEOUT_MS;
+
+	/** Retries of a call that failed on the network; they reuse the call's idempotency key. */
+	@Value("${config.payment.stripe.maxNetworkRetries:2}")
+	private int maxNetworkRetries = StripeNetwork.DEFAULT_MAX_NETWORK_RETRIES;
+
 	/**
 	 * Per-call options carrying this store's secret key. The module is a singleton shared by
 	 * every MerchantStore, so the key must never be written to the process-wide Stripe.apiKey.
-	 * Timeouts are inherited from the SDK defaults.
+	 * Timeouts are explicit: the SDK defaults (30 s connect, 80 s read) would hold a checkout
+	 * thread for minutes. A timeout surfaces as ApiConnectionException, an unknown outcome.
 	 */
-	static RequestOptions requestOptions(String apiKey) {
+	RequestOptions requestOptions(String apiKey) {
 		return requestOptions(apiKey, null);
 	}
 
 	/** Same as {@link #requestOptions(String)} with an idempotency key when one is given. */
-	static RequestOptions requestOptions(String apiKey, String idempotencyKey) {
-		RequestOptions.RequestOptionsBuilder builder = RequestOptions.builder()
-				.setApiKey(apiKey)
-				.setMaxNetworkRetries(2);
-		if (StringUtils.isNotBlank(idempotencyKey)) {
-			builder.setIdempotencyKey(idempotencyKey);
-		}
-		return builder.build();
+	RequestOptions requestOptions(String apiKey, String idempotencyKey) {
+		return StripeNetwork.requestOptions(apiKey, idempotencyKey, connectTimeoutMs, readTimeoutMs,
+				maxNetworkRetries);
 	}
 
 	private static String attemptRef(Payment payment) {
@@ -663,9 +724,67 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 		return cleaned.length() > 10 ? cleaned.substring(0, 10).trim() : cleaned;
 	}
 
+	/**
+	 * The succeeded refunds of a charge as REFUND transactions (gateway refund id in
+	 * TRANSACTIONID), asked from Stripe rather than read from a webhook body: current
+	 * API versions no longer embed the refund list in the charge. Pending or failed
+	 * refunds are left out so the ledger only holds money that went back.
+	 */
+	public List<Transaction> succeededRefunds(IntegrationConfiguration configuration, String chargeId)
+			throws IntegrationException {
+		String apiKey = configuration.getIntegrationKeys().get("secretKey");
+		RefundListParams params = RefundListParams.builder().setCharge(chargeId).setLimit(100L).build();
+		List<Transaction> refunds = new ArrayList<>();
+		try {
+			for (Refund re : listRefunds(params, requestOptions(apiKey))) {
+				if (!"succeeded".equals(re.getStatus()) || re.getAmount() == null
+						|| StringUtils.isBlank(re.getCurrency())) {
+					continue;
+				}
+				Transaction refund = new Transaction();
+				refund.setAmount(StripeAmounts.fromMinorUnits(re.getAmount(), re.getCurrency()));
+				refund.setTransactionDate(new Date());
+				refund.setTransactionType(TransactionType.REFUND);
+				refund.setPaymentType(PaymentType.CREDITCARD);
+				refund.getTransactionDetails().put("TRANSACTIONID", re.getId());
+				refund.getTransactionDetails().put("TRNAPPROVED", re.getStatus());
+				refund.getTransactionDetails().put("TRNORDERNUMBER", re.getId());
+				refund.getTransactionDetails().put("REFUNDEDTRANSACTION",
+						StringUtils.defaultIfBlank(re.getPaymentIntent(), chargeId));
+				refund.getTransactionDetails().put("MESSAGETEXT", "recorded from Stripe");
+				refunds.add(refund);
+			}
+		} catch (StripeException e) {
+			throw new IntegrationException("Stripe refund list of " + chargeId + " failed", e);
+		}
+		return refunds;
+	}
+
+	/** A Stripe minor-unit amount for display, for example "12.34 USD". */
+	public static String displayAmount(long minor, String currency) {
+		return StripeAmounts.fromMinorUnits(minor, currency).toPlainString() + " " + currency.toUpperCase();
+	}
+
+	/** Lists refunds. Protected so tests can stub the network call. */
+	protected List<Refund> listRefunds(RefundListParams params, RequestOptions requestOptions) throws StripeException {
+		return Refund.list(params, requestOptions).getData();
+	}
+
+	/** Creates a PaymentIntent. Protected so tests can stub the network call. */
+	protected PaymentIntent createPaymentIntent(PaymentIntentCreateParams params, RequestOptions requestOptions)
+			throws StripeException {
+		return PaymentIntent.create(params, requestOptions);
+	}
+
 	/** Retrieves a PaymentIntent. Protected so tests can stub the network call. */
 	protected PaymentIntent retrievePaymentIntent(String id, RequestOptions requestOptions) throws StripeException {
 		return PaymentIntent.retrieve(id, requestOptions);
+	}
+
+	/** Captures a PaymentIntent. Protected so tests can stub the network call. */
+	protected PaymentIntent capturePaymentIntent(PaymentIntent intent, PaymentIntentCaptureParams params,
+			RequestOptions requestOptions) throws StripeException {
+		return intent.capture(params, requestOptions);
 	}
 
 	/** Cancels a PaymentIntent. Protected so tests can stub the network call. */

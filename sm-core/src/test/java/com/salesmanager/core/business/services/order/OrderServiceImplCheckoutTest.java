@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -29,7 +30,11 @@ import org.mockito.InOrder;
 
 import com.salesmanager.core.business.exception.ServiceException;
 import com.salesmanager.core.business.repositories.order.OrderRepository;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentIntentInUseException;
+import com.salesmanager.core.business.modules.integration.payment.impl.Stripe3Payment;
 import com.salesmanager.core.business.services.payments.PaymentService;
+import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.order.Order;
@@ -37,6 +42,7 @@ import com.salesmanager.core.model.order.OrderTotalSummary;
 import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.payments.Payment;
 import com.salesmanager.core.model.payments.PaymentAttempt;
+import com.salesmanager.core.model.payments.PaymentAttemptStatus;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.shoppingcart.ShoppingCartItem;
 import com.salesmanager.core.modules.integration.IntegrationException;
@@ -47,21 +53,33 @@ class OrderServiceImplCheckoutTest {
 	private OrderServiceImpl service;
 	private PaymentService paymentService;
 	private OrderCheckoutSteps steps;
+	private PaymentAttemptService attempts;
+	private OrderRepository orders;
 
 	private final Order order = new Order();
 	private final Customer customer = new Customer();
 	private final MerchantStore store = new MerchantStore();
 	private final Payment payment = new Payment();
 	private final OrderTotalSummary summary = new OrderTotalSummary();
-	private final List<ShoppingCartItem> items = Collections.singletonList(new ShoppingCartItem());
+	private final List<ShoppingCartItem> items = Collections.singletonList(line("sku-1", 1));
+
+	private static ShoppingCartItem line(String sku, int quantity) {
+		ShoppingCartItem item = new ShoppingCartItem();
+		item.setSku(sku);
+		item.setQuantity(quantity);
+		return item;
+	}
 
 	@BeforeEach
 	void setUp() throws Exception {
-		service = new OrderServiceImpl(mock(OrderRepository.class));
+		orders = mock(OrderRepository.class);
+		service = new OrderServiceImpl(orders);
 		paymentService = mock(PaymentService.class);
 		steps = mock(OrderCheckoutSteps.class);
+		attempts = mock(PaymentAttemptService.class);
 		inject(service, "paymentService", paymentService);
 		inject(service, "orderCheckoutSteps", steps);
+		inject(service, "paymentAttemptService", attempts);
 
 		when(steps.createPendingOrder(any(Order.class), eq(customer), eq(items), isNull())).thenAnswer(inv -> {
 			Order o = inv.getArgument(0);
@@ -77,6 +95,7 @@ class OrderServiceImplCheckoutTest {
 		store.setId(1);
 		payment.setModuleName("braintree");
 		order.setTotal(new BigDecimal("10.00"));
+		order.setShoppingCartCode("cart-1");
 	}
 
 	@Test
@@ -234,6 +253,180 @@ class OrderServiceImplCheckoutTest {
 
 		verify(paymentService, never()).processPayment(any(), any(), any(), any(), any());
 		verify(steps).markPaymentFailed(eq(42L), eq(items), anyString(), isNull());
+	}
+
+	private void payWithIntent(String intentId) {
+		payment.setModuleName("stripe3");
+		payment.setPaymentMetaData(new java.util.HashMap<>(java.util.Collections.singletonMap("paymentToken", intentId)));
+	}
+
+	/** The attempt and order a first checkout left open for a 3-D Secure challenge. */
+	private Order orderAwaitingChallenge(BigDecimal total) {
+		PaymentAttempt waiting = new PaymentAttempt();
+		waiting.setId(800L);
+		waiting.setOrderId(7L);
+		waiting.setMerchantId(1);
+		waiting.setAttemptRef("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+		waiting.setGatewayRef("pi_3ds");
+		waiting.setStatus(PaymentAttemptStatus.INITIATED);
+		waiting.setFailureReason(OrderServiceImpl.AWAITING_CUSTOMER_ACTION + "requires_action");
+		when(attempts.findByGatewayRef("pi_3ds")).thenReturn(waiting);
+		Order open = new Order();
+		open.setId(7L);
+		open.setStatus(OrderStatus.PAYMENT_PENDING);
+		open.setTotal(total);
+		open.setShoppingCartCode("cart-1");
+		com.salesmanager.core.model.order.orderproduct.OrderProduct reserved =
+				new com.salesmanager.core.model.order.orderproduct.OrderProduct();
+		reserved.setSku("sku-1");
+		reserved.setProductQuantity(1);
+		open.getOrderProducts().add(reserved);
+		when(orders.findOne(7L, 1)).thenReturn(open);
+		return open;
+	}
+
+	@Test
+	void challengeRequiredKeepsTheOrderAndAttemptOpenAndStockHeld() throws Exception {
+		payWithIntent("pi_3ds");
+		when(attempts.update(eq(900L), eq(PaymentAttemptStatus.INITIATED), eq("pi_3ds"), anyString())).thenReturn(true);
+		when(paymentService.processPayment(customer, store, payment, items, order)).thenThrow(
+				new PaymentActionRequiredException("pi_3ds", "pi_3ds_secret", "requires_action"));
+
+		PaymentActionRequiredException thrown = assertThrows(PaymentActionRequiredException.class,
+				() -> service.processOrder(order, customer, items, summary, payment, store));
+
+		assertEquals(42L, thrown.getOrderId());
+		assertEquals("pi_3ds_secret", thrown.getClientSecret());
+		verify(attempts).update(900L, PaymentAttemptStatus.INITIATED, "pi_3ds",
+				OrderServiceImpl.AWAITING_CUSTOMER_ACTION + "requires_action");
+		// not a decline (stock stays reserved) and not an unknown outcome (no 202)
+		verify(steps, never()).markPaymentFailed(any(), anyList(), any(), any());
+		verify(steps, never()).markPaymentOutcomeUnknown(any(), any());
+		verify(steps, never()).markPaymentSucceeded(any(), any(), any(), any());
+		assertEquals(OrderStatus.PAYMENT_PENDING, order.getStatus());
+	}
+
+	@Test
+	void challengeThatCannotBeRecordedFailsTheOrderAsBefore() throws Exception {
+		payWithIntent("pi_3ds");
+		when(attempts.update(any(), any(), any(), any())).thenThrow(new RuntimeException("db down"));
+		PaymentActionRequiredException action = new PaymentActionRequiredException("pi_3ds", "s", "requires_action");
+		when(paymentService.processPayment(customer, store, payment, items, order)).thenThrow(action);
+
+		assertThrows(PaymentActionRequiredException.class,
+				() -> service.processOrder(order, customer, items, summary, payment, store));
+
+		// without the mark a retry could not find this order, so it must not stay open
+		verify(steps).markPaymentFailed(eq(42L), eq(items), anyString(), eq(900L));
+	}
+
+	@Test
+	void retryAfterTheChallengeResumesTheSameOrderAndAttempt() throws Exception {
+		payWithIntent("pi_3ds");
+		Order open = orderAwaitingChallenge(new BigDecimal("10.00"));
+		Transaction captured = new Transaction();
+		when(paymentService.processPayment(customer, store, payment, items, open)).thenReturn(captured);
+
+		Order result = service.processOrder(order, customer, items, summary, payment, store);
+
+		assertSame(open, result);
+		// no second reservation, no second attempt
+		verify(steps, never()).createPendingOrder(any(), any(), any(), any());
+		verify(steps, never()).beginPaymentAttempt(any());
+		// the capture carries the first attempt's reference as its idempotency key
+		assertEquals("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", payment.getPaymentMetaData().get(PaymentAttempt.META_ATTEMPT_REF));
+		verify(steps).markPaymentSucceeded(7L, OrderStatus.ORDERED, captured, 800L);
+		assertEquals(OrderStatus.ORDERED, result.getStatus());
+	}
+
+	@Test
+	void openOrderForADifferentAmountIsRetiredBeforeANewOneIsPlaced() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("99.00"));
+		Transaction tx = new Transaction();
+		when(paymentService.processPayment(customer, store, payment, items, order)).thenReturn(tx);
+
+		service.processOrder(order, customer, items, summary, payment, store);
+
+		InOrder sequence = inOrder(steps);
+		sequence.verify(steps).reconcileUnpaidOrder(eq(7L), anyString(), eq(800L));
+		sequence.verify(steps).createPendingOrder(order, customer, items, null);
+		sequence.verify(steps).markPaymentSucceeded(42L, OrderStatus.ORDERED, tx, 900L);
+	}
+
+	@Test
+	void sameIntentFromAnotherCartIsRefusedAndTheWaitingOrderIsLeftAlone() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("10.00"));
+		order.setShoppingCartCode("cart-2");
+
+		assertThrows(PaymentIntentInUseException.class,
+				() -> service.processOrder(order, customer, items, summary, payment, store));
+
+		// neither resumed (no capture of the other customer's order) nor superseded
+		// (its stock is not released), and nothing reserved for this checkout
+		verify(steps, never()).reconcileUnpaidOrder(any(), any(), any());
+		verify(steps, never()).createPendingOrder(any(), any(), any(), any());
+		verify(paymentService, never()).processPayment(any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void sameIntentFromAnotherCartWithAnotherTotalDoesNotFailTheWaitingOrder() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("99.00"));
+		order.setShoppingCartCode("cart-2");
+
+		assertThrows(PaymentIntentInUseException.class,
+				() -> service.processOrder(order, customer, items, summary, payment, store));
+
+		verify(steps, never()).reconcileUnpaidOrder(any(), any(), any());
+	}
+
+	@Test
+	void changedLinesWithTheSameTotalSupersedeTheWaitingOrderInsteadOfResumingIt() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("10.00"));
+		List<ShoppingCartItem> otherLines = Collections.singletonList(line("sku-2", 1));
+		when(steps.createPendingOrder(any(Order.class), eq(customer), eq(otherLines), isNull())).thenAnswer(inv -> {
+			Order o = inv.getArgument(0);
+			o.setId(42L);
+			return o;
+		});
+		when(paymentService.processPayment(customer, store, payment, otherLines, order)).thenThrow(
+				new ServiceException(ServiceException.EXCEPTION_PAYMENT_DECLINED, "card declined"));
+
+		assertThrows(ServiceException.class,
+				() -> service.processOrder(order, customer, otherLines, summary, payment, store));
+
+		// the waiting order returns its own reserved lines; the decline returns the
+		// new order's lines, so every unit of stock goes back exactly once
+		InOrder sequence = inOrder(steps);
+		sequence.verify(steps).reconcileUnpaidOrder(eq(7L), anyString(), eq(800L));
+		sequence.verify(steps).createPendingOrder(order, customer, otherLines, null);
+		sequence.verify(steps).markPaymentFailed(eq(42L), eq(otherLines), anyString(), eq(900L));
+	}
+
+	@Test
+	void theCartIsPassedToTheModuleToCheckThePaymentIntent() throws Exception {
+		payWithIntent("pi_new");
+		when(paymentService.processPayment(customer, store, payment, items, order)).thenReturn(new Transaction());
+
+		service.processOrder(order, customer, items, summary, payment, store);
+
+		assertEquals("cart-1", payment.getPaymentMetaData().get(Stripe3Payment.META_CART_CODE));
+	}
+
+	@Test
+	void attemptThatIsNotWaitingForTheCustomerIsNotResumed() throws Exception {
+		payWithIntent("pi_3ds");
+		orderAwaitingChallenge(new BigDecimal("10.00"));
+		attempts.findByGatewayRef("pi_3ds").setFailureReason(null);
+		when(paymentService.processPayment(customer, store, payment, items, order)).thenReturn(new Transaction());
+
+		service.processOrder(order, customer, items, summary, payment, store);
+
+		verify(steps).createPendingOrder(order, customer, items, null);
+		verify(steps, never()).reconcileUnpaidOrder(any(), any(), any());
 	}
 
 	private static void inject(Object target, String name, Object value) throws Exception {

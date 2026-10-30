@@ -11,6 +11,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 
 import com.braintreegateway.BraintreeGateway;
 import com.braintreegateway.Environment;
@@ -65,11 +66,30 @@ public class BraintreePayment implements PaymentModule, PaymentStatusLookup, Pay
 		return te;
 	}
 
+	/** Connect timeout of every Braintree call, in milliseconds. */
+	@Value("${config.payment.braintree.connectTimeoutMs:3000}")
+	private int connectTimeoutMs = 3000;
+
 	/**
-	 * Builds the Braintree gateway for the given configuration.
+	 * Read timeout of every Braintree call, in milliseconds (the SDK default is 60 s).
+	 * A timeout is thrown as com.braintreegateway.exceptions.TimeoutException, a runtime
+	 * exception caused by SocketTimeoutException, which checkout treats as an unknown outcome.
+	 */
+	@Value("${config.payment.braintree.readTimeoutMs:15000}")
+	private int readTimeoutMs = 15000;
+
+	/**
+	 * Builds the Braintree gateway for the given configuration, with explicit timeouts.
 	 * Protected so it can be overridden in tests.
 	 */
 	protected BraintreeGateway gateway(IntegrationConfiguration configuration) {
+		BraintreeGateway gateway = newGateway(configuration);
+		gateway.getConfiguration().setConnectTimeout(connectTimeoutMs);
+		gateway.getConfiguration().setTimeout(readTimeoutMs);
+		return gateway;
+	}
+
+	private static BraintreeGateway newGateway(IntegrationConfiguration configuration) {
 
 		String merchantId = configuration.getIntegrationKeys().get("merchant_id");
 		String publicKey = configuration.getIntegrationKeys().get("public_key");

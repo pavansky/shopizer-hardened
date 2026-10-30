@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
 import com.salesmanager.core.business.modules.integration.payment.impl.Stripe3Payment;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.payments.PaymentAttempt;
@@ -169,5 +170,24 @@ class Stripe3SandboxIT {
 
 		assertEquals(Outcome.NOT_FOUND, status.getOutcome());
 		proof(GW, "unknown reference", ref + " -> " + status);
+	}
+
+	@Test
+	void threeDSecureChallengeIsSurfacedAsActionRequiredNotADecline() throws Exception {
+		String ref = newAttemptRef();
+		PaymentIntent pi = confirmedIntent("pm_card_threeDSecure2Required",
+				PaymentIntentCreateParams.CaptureMethod.MANUAL, ref);
+		assertEquals("requires_action", pi.getStatus());
+
+		PaymentActionRequiredException action = assertThrows(PaymentActionRequiredException.class,
+				() -> module.authorizeAndCapture(store, null, null, AMOUNT,
+						payment("stripe_token", pi.getId(), ref, AMOUNT), configuration, null));
+
+		assertEquals(pi.getId(), action.getPaymentIntentId());
+		assertEquals("requires_action", action.getStatus());
+		assertNotNull(action.getClientSecret());
+		// nothing was taken: the reconciler keeps waiting instead of failing the order
+		assertEquals(Outcome.PENDING, module.lookup(store, configuration, attempt(ref, pi.getId(), AMOUNT)).getOutcome());
+		proof(GW, "3-D Secure required", pi.getId() + " " + pi.getStatus() + " -> payment_action_required");
 	}
 }

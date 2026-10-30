@@ -404,6 +404,9 @@ public class OrderApi {
 			throw new PaymentBeingConfirmed(e.getOrderId());
 		} catch (Exception e) {
 			rethrowIfOutOfStock(e);
+			if (com.salesmanager.shop.store.api.v1.payment.PaymentErrorResolver.handles(e)) {
+				throw e; // answered by PaymentErrorResolver, not a server error
+			}
 			LOGGER.error("Error while processing checkout", e);
 			try {
 				response.sendError(503, "Error while processing checkout " + e.getMessage());

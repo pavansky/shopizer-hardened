@@ -36,6 +36,10 @@ import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.business.services.order.ordertotal.OrderTotalService;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.TransactionService;
+import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentActionRequiredException;
+import com.salesmanager.core.business.modules.integration.payment.impl.PaymentIntentInUseException;
+import com.salesmanager.core.business.modules.integration.payment.impl.Stripe3Payment;
 import com.salesmanager.core.business.services.shipping.ShippingService;
 import com.salesmanager.core.business.services.shoppingcart.ShoppingCartService;
 import com.salesmanager.core.business.services.tax.TaxService;
@@ -60,6 +64,7 @@ import com.salesmanager.core.model.order.orderstatus.OrderStatus;
 import com.salesmanager.core.model.order.orderstatus.OrderStatusHistory;
 import com.salesmanager.core.model.payments.Payment;
 import com.salesmanager.core.model.payments.PaymentAttempt;
+import com.salesmanager.core.model.payments.PaymentAttemptStatus;
 import com.salesmanager.core.modules.integration.PaymentOutcomeUnknownException;
 import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.payments.TransactionType;
@@ -103,6 +108,9 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
 
     @Inject
     private OrderCheckoutSteps orderCheckoutSteps;
+
+    @Inject
+    private PaymentAttemptService paymentAttemptService;
 
     private final OrderRepository orderRepository;
 
@@ -155,30 +163,56 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	if (finalStatus == null || finalStatus == OrderStatus.PAYMENT_PENDING) {
     		finalStatus = OrderStatus.ORDERED;
     	}
-    	order = orderCheckoutSteps.createPendingOrder(order, customer, items, transaction);
+    	// A checkout retried after a 3-D Secure challenge carries the same PaymentIntent:
+    	// continue the order kept open for it instead of reserving the stock again.
+    	PaymentAttempt attempt = null;
+    	Resume resume = attemptAwaitingCustomerAction(order, items, payment, store);
+    	if (resume != null) {
+    		// the waiting order was placed from this same cart with the same lines and
+    		// total, so the current items are the lines its stock was reserved for
+    		attempt = resume.attempt;
+    		order = resume.order;
+    		LOGGER.info("Order {} resumes payment attempt {} after customer action", order.getId(),
+    				attempt.getAttemptRef());
+    	} else {
+    		order = orderCheckoutSteps.createPendingOrder(order, customer, items, transaction);
 
-    	// 2. committed step: write-ahead record of the gateway call. Its reference goes to
-    	//    the gateway, so a charge whose Transaction is never stored can still be found.
-    	PaymentAttempt attempt;
-    	try {
-    		attempt = orderCheckoutSteps.beginPaymentAttempt(newAttempt(order, payment, store));
-    	} catch (RuntimeException e) {
-    		// Nothing was sent to the gateway: fail the order now rather than waiting for the reconciler.
-    		LOGGER.error("Could not record the payment attempt of order " + order.getId() + "; not charging", e);
-    		orderCheckoutSteps.markPaymentFailed(order.getId(), items, "payment attempt not recorded", null);
-    		order.setStatus(OrderStatus.PAYMENT_FAILED);
-    		throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Payment could not be started");
+    		// 2. committed step: write-ahead record of the gateway call. Its reference goes to
+    		//    the gateway, so a charge whose Transaction is never stored can still be found.
+    		try {
+    			attempt = orderCheckoutSteps.beginPaymentAttempt(newAttempt(order, payment, store));
+    		} catch (RuntimeException e) {
+    			// Nothing was sent to the gateway: fail the order now rather than waiting for the reconciler.
+    			LOGGER.error("Could not record the payment attempt of order " + order.getId() + "; not charging", e);
+    			orderCheckoutSteps.markPaymentFailed(order.getId(), items, "payment attempt not recorded", null);
+    			order.setStatus(OrderStatus.PAYMENT_FAILED);
+    			throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Payment could not be started");
+    		}
     	}
     	if (payment.getPaymentMetaData() == null) {
     		payment.setPaymentMetaData(new HashMap<>());
     	}
     	payment.getPaymentMetaData().put(PaymentAttempt.META_ATTEMPT_REF, attempt.getAttemptRef());
+    	if (StringUtils.isNotBlank(order.getShoppingCartCode())) {
+    		// lets the module check that a PaymentIntent was started for this cart
+    		payment.getPaymentMetaData().put(Stripe3Payment.META_CART_CODE, order.getShoppingCartCode());
+    	}
 
     	// 3. charge (outside of any write that could still roll back the order)
     	Transaction processTransaction;
     	try {
     		processTransaction = paymentService.processPayment(customer, store, payment, items, order);
     	} catch (Exception e) {
+    		PaymentActionRequiredException actionRequired = PaymentActionRequiredException.in(e);
+    		if (actionRequired != null && keepOpenForCustomerAction(attempt, actionRequired)) {
+    			// Not paid yet: the customer finishes 3-D Secure (or picks another card) in the
+    			// browser. The order stays PAYMENT_PENDING with its stock and the attempt stays
+    			// open; the retried checkout continues it. No money moved.
+    			LOGGER.info("Order {} waits for customer action on PaymentIntent {} ({})", order.getId(),
+    					actionRequired.getPaymentIntentId(), actionRequired.getStatus());
+    			actionRequired.setOrderId(order.getId());
+    			throw actionRequired;
+    		}
     		if (isOutcomeUnknown(e)) {
     			// Money may have been taken. Keep the order PAYMENT_PENDING and its stock
     			// reserved; the reconciler asks the gateway and settles it.
@@ -217,6 +251,101 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
     	order.setStatus(finalStatus);
 
     	return order;
+    }
+
+    /** Failure reason of an attempt kept open while the customer completes the payment in the browser. */
+    static final String AWAITING_CUSTOMER_ACTION = "awaiting customer action: ";
+
+    /**
+     * Marks the attempt as waiting for the customer. It stays INITIATED, so the
+     * reconciler still asks Stripe about it (an abandoned requires_payment_method
+     * intent fails the order after the grace period, an abandoned challenge moves it
+     * to PAYMENT_REVIEW after a day). Returns false when the mark could not be
+     * written; the order is then failed as before, so no second open order can
+     * later use the same PaymentIntent.
+     */
+    private boolean keepOpenForCustomerAction(PaymentAttempt attempt, PaymentActionRequiredException actionRequired) {
+    	try {
+    		return paymentAttemptService.update(attempt.getId(), PaymentAttemptStatus.INITIATED,
+    				actionRequired.getPaymentIntentId(), AWAITING_CUSTOMER_ACTION + actionRequired.getStatus());
+    	} catch (RuntimeException e) {
+    		LOGGER.error("Could not keep payment attempt " + attempt.getAttemptRef() + " open for customer action", e);
+    		return false;
+    	}
+    }
+
+    /** A waiting order and its attempt that a retried checkout continues. */
+    private static final class Resume {
+    	final PaymentAttempt attempt;
+    	final Order order;
+
+    	Resume(PaymentAttempt attempt, Order order) {
+    		this.attempt = attempt;
+    		this.order = order;
+    	}
+    }
+
+    /**
+     * The open attempt (and its order) of an earlier checkout that is waiting for the
+     * customer to act on the same PaymentIntent, or null.
+     *
+     * The waiting order must come from the same cart as this checkout; otherwise the
+     * checkout is refused with {@link PaymentIntentInUseException} and the waiting
+     * order is not touched, so nobody can take over or cancel another customer's
+     * order with its PaymentIntent id. From the same cart, it is resumed only while
+     * still PAYMENT_PENDING with the same total and the same lines (sku and quantity).
+     * Otherwise it is failed (its own stock returned) before a new order is placed, so
+     * at most one open order ever uses a PaymentIntent and the reconciler cannot
+     * confirm two orders for one payment.
+     */
+    private Resume attemptAwaitingCustomerAction(Order order, List<ShoppingCartItem> items, Payment payment,
+    		MerchantStore store) throws ServiceException {
+    	String intentId = knownGatewayRef(payment);
+    	if (intentId == null) {
+    		return null;
+    	}
+    	PaymentAttempt previous = paymentAttemptService.findByGatewayRef(intentId);
+    	if (previous == null || previous.getStatus() != PaymentAttemptStatus.INITIATED
+    			|| !StringUtils.startsWith(previous.getFailureReason(), AWAITING_CUSTOMER_ACTION)
+    			|| !store.getId().equals(previous.getMerchantId())) {
+    		return null;
+    	}
+    	// fetched with its lines, scoped to the store
+    	Order waiting = orderRepository.findOne(previous.getOrderId(), store.getId());
+    	if (waiting != null && !sameCart(waiting, order)) {
+    		LOGGER.warn("Checkout of cart {} refused: PaymentIntent {} is held by order {} of another cart",
+    				order.getShoppingCartCode(), intentId, waiting.getId());
+    		throw new PaymentIntentInUseException(intentId);
+    	}
+    	if (waiting != null && waiting.getStatus() == OrderStatus.PAYMENT_PENDING && waiting.getTotal() != null
+    			&& order.getTotal() != null && waiting.getTotal().compareTo(order.getTotal()) == 0
+    			&& sameLines(waiting, items)) {
+    		return new Resume(previous, waiting);
+    	}
+    	LOGGER.info("Order {} waiting on PaymentIntent {} is superseded by a new checkout", previous.getOrderId(),
+    			intentId);
+    	orderCheckoutSteps.reconcileUnpaidOrder(previous.getOrderId(), "superseded by a new checkout",
+    			previous.getId());
+    	return null;
+    }
+
+    private static boolean sameCart(Order waiting, Order order) {
+    	return StringUtils.isNotBlank(order.getShoppingCartCode())
+    			&& order.getShoppingCartCode().equals(waiting.getShoppingCartCode());
+    }
+
+    /** True when the cart lines are the order's lines: the same skus with the same quantities. */
+    static boolean sameLines(Order waiting, List<ShoppingCartItem> items) {
+    	Map<String, Integer> ordered = new HashMap<>();
+    	for (OrderProduct product : waiting.getOrderProducts()) {
+    		ordered.merge(StringUtils.defaultString(product.getSku()), product.getProductQuantity(), Integer::sum);
+    	}
+    	Map<String, Integer> inCart = new HashMap<>();
+    	for (ShoppingCartItem item : items) {
+    		inCart.merge(StringUtils.defaultString(item.getSku()),
+    				item.getQuantity() == null ? 0 : item.getQuantity(), Integer::sum);
+    	}
+    	return ordered.equals(inCart);
     }
 
     private static PaymentAttempt newAttempt(Order order, Payment payment, MerchantStore store) {

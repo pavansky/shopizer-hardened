@@ -1,6 +1,11 @@
 package com.salesmanager.shop.store.api.v1.payment;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -10,12 +15,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.List;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
@@ -23,11 +31,17 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import com.salesmanager.core.business.services.merchant.MerchantStoreService;
 import com.salesmanager.core.business.services.order.reconciliation.PendingOrderReconciler;
+import com.salesmanager.core.business.modules.integration.payment.impl.Stripe3Payment;
+import com.salesmanager.core.business.services.payments.GatewayEventRecorder;
 import com.salesmanager.core.business.services.payments.PaymentService;
 import com.salesmanager.core.business.services.payments.attempt.PaymentAttemptService;
 import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.payments.PaymentAttempt;
+import com.salesmanager.core.model.payments.Transaction;
 import com.salesmanager.core.model.system.IntegrationConfiguration;
+
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 class StripeWebhookApiTest {
 
@@ -38,11 +52,20 @@ class StripeWebhookApiTest {
 	private MockMvc mvc;
 	private PaymentAttemptService attempts;
 	private PendingOrderReconciler reconciler;
+	private GatewayEventRecorder recorder;
+	private Stripe3Payment stripe;
+	private PaymentService payments;
+	private SimpleMeterRegistry meters;
 
 	@BeforeEach
 	void setUp() throws Exception {
 		MerchantStoreService stores = mock(MerchantStoreService.class);
-		PaymentService payments = mock(PaymentService.class);
+		payments = mock(PaymentService.class);
+		recorder = mock(GatewayEventRecorder.class);
+		stripe = mock(Stripe3Payment.class);
+		meters = new SimpleMeterRegistry();
+		when(payments.getPaymentModule("stripe3")).thenReturn(stripe);
+		when(recorder.recordRefunds(anyLong(), any(), anyString())).thenReturn(new GatewayEventRecorder.RefundResult());
 		attempts = mock(PaymentAttemptService.class);
 		reconciler = mock(PendingOrderReconciler.class);
 
@@ -60,6 +83,10 @@ class StripeWebhookApiTest {
 		ReflectionTestUtils.setField(api, "paymentService", payments);
 		ReflectionTestUtils.setField(api, "paymentAttemptService", attempts);
 		ReflectionTestUtils.setField(api, "reconciler", reconciler);
+		ReflectionTestUtils.setField(api, "gatewayEventRecorder", recorder);
+		StaticListableBeanFactory beans = new StaticListableBeanFactory();
+		beans.addBean("meterRegistry", meters);
+		ReflectionTestUtils.setField(api, "meterRegistry", beans.getBeanProvider(MeterRegistry.class));
 		mvc = MockMvcBuilders.standaloneSetup(api).build();
 	}
 
@@ -113,5 +140,82 @@ class StripeWebhookApiTest {
 		mvc.perform(post("/api/v1/webhooks/stripe/OTHER").contentType(MediaType.APPLICATION_JSON)
 				.header("Stripe-Signature", sign(PAYLOAD, SECRET)).content(PAYLOAD))
 				.andExpect(status().isNotFound());
+	}
+
+	private void deliver(String payload) throws Exception {
+		mvc.perform(post("/api/v1/webhooks/stripe/DEFAULT").contentType(MediaType.APPLICATION_JSON)
+				.header("Stripe-Signature", sign(payload, SECRET)).content(payload))
+				.andExpect(status().isOk());
+	}
+
+	@Test
+	void dashboardRefundIsAskedFromStripeAndRecorded() throws Exception {
+		PaymentAttempt attempt = attempt(1);
+		when(attempts.findByGatewayRef("pi_123")).thenReturn(attempt);
+		List<Transaction> fromStripe = Collections.singletonList(new Transaction());
+		when(stripe.succeededRefunds(any(), eq("ch_9"))).thenReturn(fromStripe);
+		GatewayEventRecorder.RefundResult result = new GatewayEventRecorder.RefundResult();
+		result.recorded = 1;
+		when(recorder.recordRefunds(42L, fromStripe, "Stripe")).thenReturn(result);
+
+		// the body's amounts are not used: the refunds are listed from Stripe
+		deliver("{\"id\":\"evt_2\",\"type\":\"charge.refunded\",\"data\":{\"object\":"
+				+ "{\"id\":\"ch_9\",\"payment_intent\":\"pi_123\",\"amount_refunded\":999999}}}");
+
+		verify(recorder).recordRefunds(42L, fromStripe, "Stripe");
+		verify(reconciler, never()).reconcileOrder(anyLong());
+		assertEquals(1.0, meters.counter("shop.payment.webhook.refunds", "outcome", "recorded").count());
+	}
+
+	@Test
+	void refundThatSucceedsLaterIsRecordedThroughTheSamePath() throws Exception {
+		// charge.refund.updated carries the refund: its charge is listed from Stripe again
+		when(attempts.findByGatewayRef("pi_123")).thenReturn(attempt(1));
+		List<Transaction> fromStripe = Collections.singletonList(new Transaction());
+		when(stripe.succeededRefunds(any(), eq("ch_9"))).thenReturn(fromStripe);
+		when(recorder.recordRefunds(42L, fromStripe, "Stripe")).thenReturn(new GatewayEventRecorder.RefundResult());
+
+		deliver("{\"id\":\"evt_5\",\"type\":\"charge.refund.updated\",\"data\":{\"object\":"
+				+ "{\"id\":\"re_1\",\"charge\":\"ch_9\",\"payment_intent\":\"pi_123\",\"status\":\"succeeded\"}}}");
+
+		verify(recorder).recordRefunds(42L, fromStripe, "Stripe");
+		verify(reconciler, never()).reconcileOrder(anyLong());
+	}
+
+	@Test
+	void disputeCreatedIsWrittenToTheOrderHistory() throws Exception {
+		when(attempts.findByGatewayRef("pi_123")).thenReturn(attempt(1));
+		when(recorder.recordDispute(eq(42L), eq("dp_1"), eq("opened"), anyString(), eq(true))).thenReturn(true);
+
+		deliver("{\"id\":\"evt_3\",\"type\":\"charge.dispute.created\",\"data\":{\"object\":"
+				+ "{\"id\":\"dp_1\",\"charge\":\"ch_9\",\"payment_intent\":\"pi_123\",\"amount\":1234,"
+				+ "\"currency\":\"usd\",\"reason\":\"fraudulent\",\"status\":\"needs_response\","
+				+ "\"evidence_details\":{\"due_by\":1893456000}}}}");
+
+		ArgumentCaptor<String> comment = ArgumentCaptor.forClass(String.class);
+		verify(recorder).recordDispute(eq(42L), eq("dp_1"), eq("opened"), comment.capture(), eq(true));
+		assertTrue(comment.getValue().contains("fraudulent"));
+		assertTrue(comment.getValue().contains("12.34 USD"));
+		assertTrue(comment.getValue().contains("2030-01-01"));
+		assertEquals(1.0, meters.counter("shop.payment.disputes", "event", "created").count());
+	}
+
+	@Test
+	void disputeClosedOnALegacyChargeIsFoundByChargeId() throws Exception {
+		when(attempts.findByGatewayRef("ch_legacy")).thenReturn(attempt(1));
+
+		deliver("{\"id\":\"evt_4\",\"type\":\"charge.dispute.closed\",\"data\":{\"object\":"
+				+ "{\"id\":\"dp_2\",\"charge\":\"ch_legacy\",\"status\":\"won\",\"reason\":\"general\"}}}");
+
+		verify(recorder).recordDispute(eq(42L), eq("dp_2"), eq("closed"), anyString(), eq(false));
+	}
+
+	@Test
+	void otherEventTypesAreIgnored() throws Exception {
+		deliver("{\"id\":\"evt_5\",\"type\":\"customer.created\",\"data\":{\"object\":{\"id\":\"cus_1\"}}}");
+
+		verify(recorder, never()).recordRefunds(anyLong(), any(), anyString());
+		verify(recorder, never()).recordDispute(anyLong(), anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.anyBoolean());
+		verify(reconciler, never()).reconcileOrder(anyLong());
 	}
 }
