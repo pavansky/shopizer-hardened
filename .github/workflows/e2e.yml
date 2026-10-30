@@ -18,7 +18,7 @@ jobs:
   deploy-config:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Prometheus config and alert rule unit tests
         run: |
           docker run --rm -v "$PWD/deploy/prometheus":/etc/prometheus --entrypoint promtool prom/prometheus:v3.5.0 check config /etc/prometheus/prometheus.yml
@@ -37,18 +37,18 @@ jobs:
     env:
       COMPOSE: docker compose --env-file deploy/.env -f deploy/docker-compose.yml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: shopizer-hardened }
       # the compose file builds ../../shopizer-admin-hardened and ../../shopizer-shop-hardened
       # relative to deploy/. If these repositories are private, add a read-only token as the
       # E2E_REPO_TOKEN secret.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: pavansky/shopizer-admin-hardened
           ref: main
           path: shopizer-admin-hardened
           token: ${{ secrets.E2E_REPO_TOKEN || github.token }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: pavansky/shopizer-shop-hardened
           ref: main
@@ -109,7 +109,7 @@ jobs:
         working-directory: shopizer-hardened
         run: deploy/backup/restore-drill.sh --fresh
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: 20 }
 
       - name: Storefront browser specs
@@ -131,7 +131,7 @@ jobs:
           for s in $($COMPOSE config --services); do $COMPOSE logs --no-color "$s" > "../e2e-logs/$s.log" 2>&1 || true; done
           cp demo-checkout.log ../e2e-logs/ 2>/dev/null || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: e2e-logs
