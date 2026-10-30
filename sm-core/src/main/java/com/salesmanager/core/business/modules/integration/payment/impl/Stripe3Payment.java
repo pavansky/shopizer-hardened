@@ -10,6 +10,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 
 import com.salesmanager.core.model.customer.Customer;
 import com.salesmanager.core.model.merchant.MerchantStore;
@@ -622,24 +623,32 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 		return Refund.create(params, requestOptions);
 	}
 
+	/** Connect timeout of every Stripe call, in milliseconds. */
+	@Value("${config.payment.stripe.connectTimeoutMs:3000}")
+	private int connectTimeoutMs = StripeNetwork.DEFAULT_CONNECT_TIMEOUT_MS;
+
+	/** Read timeout of every Stripe call, in milliseconds. */
+	@Value("${config.payment.stripe.readTimeoutMs:15000}")
+	private int readTimeoutMs = StripeNetwork.DEFAULT_READ_TIMEOUT_MS;
+
+	/** Retries of a call that failed on the network; they reuse the call's idempotency key. */
+	@Value("${config.payment.stripe.maxNetworkRetries:2}")
+	private int maxNetworkRetries = StripeNetwork.DEFAULT_MAX_NETWORK_RETRIES;
+
 	/**
 	 * Per-call options carrying this store's secret key. The module is a singleton shared by
 	 * every MerchantStore, so the key must never be written to the process-wide Stripe.apiKey.
-	 * Timeouts are inherited from the SDK defaults.
+	 * Timeouts are explicit: the SDK defaults (30 s connect, 80 s read) would hold a checkout
+	 * thread for minutes. A timeout surfaces as ApiConnectionException, an unknown outcome.
 	 */
-	static RequestOptions requestOptions(String apiKey) {
+	RequestOptions requestOptions(String apiKey) {
 		return requestOptions(apiKey, null);
 	}
 
 	/** Same as {@link #requestOptions(String)} with an idempotency key when one is given. */
-	static RequestOptions requestOptions(String apiKey, String idempotencyKey) {
-		RequestOptions.RequestOptionsBuilder builder = RequestOptions.builder()
-				.setApiKey(apiKey)
-				.setMaxNetworkRetries(2);
-		if (StringUtils.isNotBlank(idempotencyKey)) {
-			builder.setIdempotencyKey(idempotencyKey);
-		}
-		return builder.build();
+	RequestOptions requestOptions(String apiKey, String idempotencyKey) {
+		return StripeNetwork.requestOptions(apiKey, idempotencyKey, connectTimeoutMs, readTimeoutMs,
+				maxNetworkRetries);
 	}
 
 	private static String attemptRef(Payment payment) {

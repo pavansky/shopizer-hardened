@@ -154,8 +154,8 @@ class Stripe3StatusLookupTest {
 
 	@Test
 	void captureOptionsCarryTheAttemptReference() {
-		assertEquals("ref-1", Stripe3Payment.requestOptions("sk", "ref-1").getIdempotencyKey());
-		assertNull(Stripe3Payment.requestOptions("sk").getIdempotencyKey());
+		assertEquals("ref-1", new Stripe3Payment().requestOptions("sk", "ref-1").getIdempotencyKey());
+		assertNull(new Stripe3Payment().requestOptions("sk").getIdempotencyKey());
 	}
 
 	@Test
