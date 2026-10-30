@@ -113,6 +113,7 @@ public class AuthenticationTokenFilter extends OncePerRequestFilter {
     	// Actuator endpoints (other than health/info) require an admin token, so
     	// the admin token is resolved for them as well.
     	if(requestUrl.contains("/api/v1/private") || requestUrl.contains("/api/v2/private")
+    			|| requestUrl.contains("/api/v1/sec/private") || requestUrl.contains("/api/v2/sec/private")
     			|| request.getRequestURI().startsWith(request.getContextPath() + "/actuator/")) {
     		
     		//setHeader(request,response);  

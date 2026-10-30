@@ -19,11 +19,16 @@ import com.salesmanager.core.business.services.catalog.product.type.ProductTypeS
 import com.salesmanager.core.business.services.common.generic.SalesManagerEntityServiceImpl;
 import com.salesmanager.core.model.common.GenericEntityList;
 import com.salesmanager.core.model.merchant.MerchantStore;
+import com.salesmanager.core.model.tax.taxclass.TaxClass;
+import com.salesmanager.core.business.services.tax.TaxClassService;
 import com.salesmanager.core.model.merchant.MerchantStoreCriteria;
 
 @Service("merchantService")
 public class MerchantStoreServiceImpl extends SalesManagerEntityServiceImpl<Integer, MerchantStore>
 		implements MerchantStoreService {
+
+	@Inject
+	private TaxClassService taxClassService;
 
 	@Inject
 	protected ProductTypeService productTypeService;
@@ -42,7 +47,24 @@ public class MerchantStoreServiceImpl extends SalesManagerEntityServiceImpl<Inte
 	@Override
 	//@CacheEvict(value="store", key="#store.code")
 	public void saveOrUpdate(MerchantStore store) throws ServiceException {
+		boolean created = store.getId() == null;
 		super.save(store);
+		if (created) {
+			ensureDefaultTaxClass(store);
+		}
+	}
+
+	/**
+	 * Every store needs its own DEFAULT tax class: products without an explicit class
+	 * fall back to it, and tax lookups are scoped to the store.
+	 */
+	private void ensureDefaultTaxClass(MerchantStore store) throws ServiceException {
+		if (taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store) == null) {
+			TaxClass taxClass = new TaxClass(TaxClass.DEFAULT_TAX_CLASS);
+			taxClass.setTitle(TaxClass.DEFAULT_TAX_CLASS);
+			taxClass.setMerchantStore(store);
+			taxClassService.saveOrUpdate(taxClass);
+		}
 	}
 
 	@Override

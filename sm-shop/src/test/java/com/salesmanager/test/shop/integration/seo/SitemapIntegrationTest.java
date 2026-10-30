@@ -123,7 +123,6 @@ class SitemapIntegrationTest extends ServicesTestSupport {
    * rule cannot be dropped without a failing test.
    */
   @Test
-  @Disabled("Needs the GET /api/v1/sitemap.xml permit rule in MultipleEntryPointsSecurityConfig")
   void isPublicOverHttp() {
     ResponseEntity<String> response = testRestTemplate.exchange(
         "/api/v1/sitemap.xml?store=" + Constants.DEFAULT_STORE, HttpMethod.GET,

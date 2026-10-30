@@ -113,14 +113,20 @@ public class RestErrorHandler {
     }
     
     @RequestMapping(produces = "application/json")
+    /**
+     * 401 means "who are you?"; 403 means "known, but not allowed". A signed-in staff
+     * member without the right role gets 403, so the admin does not log them out.
+     */
     @ExceptionHandler(UnauthorizedException.class)
-    @ResponseStatus(HttpStatus.UNAUTHORIZED)
-    public @ResponseBody ErrorEntity handleServiceException(UnauthorizedException exception) {
-        log.error(exception.getErrorMessage(), exception);
-
+    public org.springframework.http.ResponseEntity<ErrorEntity> handleServiceException(UnauthorizedException exception) {
+        log.warn(exception.getErrorMessage());
+        org.springframework.security.core.Authentication auth =
+                org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        boolean known = auth != null && auth.isAuthenticated()
+                && !(auth instanceof org.springframework.security.authentication.AnonymousAuthenticationToken);
         ErrorEntity errorEntity = createErrorEntity(exception.getErrorCode(), exception.getErrorMessage(),
                 exception.getLocalizedMessage());
-        return errorEntity;
+        return org.springframework.http.ResponseEntity.status(known ? HttpStatus.FORBIDDEN : HttpStatus.UNAUTHORIZED).body(errorEntity);
     }
 
     @RequestMapping(produces = "application/json")
