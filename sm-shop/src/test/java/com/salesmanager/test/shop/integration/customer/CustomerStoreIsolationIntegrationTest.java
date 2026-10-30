@@ -51,10 +51,13 @@ import com.salesmanager.shop.application.ShopApplication;
 import com.salesmanager.shop.model.catalog.product.PersistableProductReview;
 import com.salesmanager.shop.model.catalog.product.ReadableProductReview;
 import com.salesmanager.shop.model.customer.PersistableCustomer;
+import com.salesmanager.shop.model.customer.PersistableCustomerReview;
 import com.salesmanager.shop.model.customer.ReadableCustomer;
+import com.salesmanager.shop.model.customer.ReadableCustomerReview;
 import com.salesmanager.shop.model.customer.address.Address;
 import com.salesmanager.shop.populator.customer.ReadableCustomerList;
 import com.salesmanager.shop.store.security.AuthenticationRequest;
+import com.salesmanager.shop.store.security.PasswordRequest;
 import com.salesmanager.shop.store.security.AuthenticationResponse;
 import com.salesmanager.test.shop.common.ServicesTestSupport;
 
@@ -77,6 +80,8 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 	private static final String PASSWORD_A = "storeA-pass1";
 	private static final String PASSWORD_B = "storeB-pass1";
 	private static final String EMAIL_ONLY_B = "iso-only-b@test.com";
+	private static final String EMAIL_REVIEWER_A = "iso-reviewer-a@test.com";
+	private static final String CUSTOMER_REVIEW_B = "store B customer review text";
 
 	private static final Date DATE = new Date(System.currentTimeMillis());
 
@@ -94,6 +99,8 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 	private static Long sharedCustomerA;
 	private static Long sharedCustomerB;
 	private static Long onlyCustomerB;
+	private static Long reviewerA;
+	private static Long customerReviewB;
 	private static Long productB;
 	private static Long relatedProductB;
 	private static Long reviewB;
@@ -109,6 +116,7 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 		sharedCustomerA = register(SHARED_EMAIL, PASSWORD_A, STORE_A).getId();
 		sharedCustomerB = register(SHARED_EMAIL, PASSWORD_B, STORE_B).getId();
 		onlyCustomerB = register(EMAIL_ONLY_B, PASSWORD_B, STORE_B).getId();
+		reviewerA = register(EMAIL_REVIEWER_A, PASSWORD_A, STORE_A).getId();
 		assertNotNull(sharedCustomerA);
 		assertNotNull(sharedCustomerB);
 		assertNotNull(onlyCustomerB);
@@ -144,6 +152,18 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 		assertNotNull(reviews);
 		assertEquals(1, reviews.length);
 		reviewB = reviews[0].getId();
+
+		// a customer review inside store B: sharedCustomerB reviews onlyCustomerB
+		PersistableCustomerReview customerReview = new PersistableCustomerReview();
+		customerReview.setCustomerId(sharedCustomerB);
+		customerReview.setRating(4d);
+		customerReview.setDescription(CUSTOMER_REVIEW_B);
+		assertThat(exchange("/api/v1/private/customers/" + onlyCustomerB + "/reviews?store=" + STORE_B, HttpMethod.POST,
+				customerReview, getHeader()).getStatusCode(), is(HttpStatus.CREATED));
+		ReadableCustomerReview[] customerReviews = customerReviewsOf(onlyCustomerB, STORE_B);
+		assertEquals(1, customerReviews.length);
+		customerReviewB = customerReviews[0].getId();
+		assertNotNull(customerReviewB);
 
 		seeded = true;
 	}
@@ -181,11 +201,18 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 		assertThat(exchange("/api/v1/private/customer/" + onlyCustomerB + "?store=" + STORE_A, HttpMethod.DELETE, null, admin)
 				.getStatusCode(), is(HttpStatus.NOT_FOUND));
 
+		// create with store B's id in the body creates a new store A customer and
+		// leaves store B's customer alone
+		PersistableCustomer createBody = customer("iso-create-with-id@test.com", "whatever1", "Created");
+		createBody.setId(onlyCustomerB);
+		ResponseEntity<ReadableCustomer> created = testRestTemplate.exchange("/api/v1/private/customer?store=" + STORE_A,
+				HttpMethod.POST, new HttpEntity<>(createBody, admin), ReadableCustomer.class);
+		assertThat(created.getStatusCode(), is(HttpStatus.OK));
+		assertNotEquals(onlyCustomerB, created.getBody().getId());
+
 		// customer reviews
 		assertThat(exchange("/api/v1/customers/" + onlyCustomerB + "/reviews?store=" + STORE_A, HttpMethod.GET, null, admin)
 				.getStatusCode(), is(HttpStatus.NOT_FOUND));
-		assertThat(exchange("/api/v1/private/customers/" + onlyCustomerB + "/reviews/1?store=" + STORE_A,
-				HttpMethod.DELETE, null, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
 
 		// list of store A never contains store B's customers
 		ReadableCustomerList listA = testRestTemplate.exchange("/api/v1/private/customers?store=" + STORE_A,
@@ -205,6 +232,76 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 		assertEquals(EMAIL_ONLY_B, inB.getBody().getEmailAddress());
 		assertTrue(inB.getBody().getBilling() == null
 				|| !"1 Hijack street".equals(inB.getBody().getBilling().getAddress()));
+		assertThat(exchange("/api/v1/private/customer/" + onlyCustomerB + "?store=" + STORE_A, HttpMethod.GET, null, admin)
+				.getStatusCode(), is(HttpStatus.NOT_FOUND));
+	}
+
+	@Test
+	public void registerWithAnotherCustomersIdCreatesANewAccount() {
+		// an unauthenticated register on store A naming store B's customer id
+		PersistableCustomer body = customer("iso-takeover@test.com", "takeover-pass1", "Taker");
+		body.setId(sharedCustomerB);
+		ResponseEntity<AuthenticationResponse> response = testRestTemplate.postForEntity(
+				"/api/v1/customer/register?store=" + STORE_A, new HttpEntity<>(body, jsonHeaders()),
+				AuthenticationResponse.class);
+		assertThat(response.getStatusCode(), is(HttpStatus.OK));
+		assertNotNull(response.getBody().getId());
+		assertNotEquals(sharedCustomerB, response.getBody().getId());
+
+		// the store B account keeps its email, password and store
+		ResponseEntity<AuthenticationResponse> victim = login(SHARED_EMAIL, PASSWORD_B, STORE_B);
+		assertThat(victim.getStatusCode(), is(HttpStatus.OK));
+		assertEquals(sharedCustomerB, victim.getBody().getId());
+		ResponseEntity<ReadableCustomer> inB = testRestTemplate.exchange(
+				"/api/v1/private/customer/" + sharedCustomerB + "?store=" + STORE_B, HttpMethod.GET,
+				new HttpEntity<>(getHeader()), ReadableCustomer.class);
+		assertThat(inB.getStatusCode(), is(HttpStatus.OK));
+		assertEquals(SHARED_EMAIL, inB.getBody().getEmailAddress());
+	}
+
+	@Test
+	public void customerReviewsOfStoreBCannotBeWrittenThroughStoreA() {
+		HttpHeaders admin = getHeader();
+
+		// a store B customer as reviewer of a store A customer
+		PersistableCustomerReview foreignReviewer = new PersistableCustomerReview();
+		foreignReviewer.setCustomerId(onlyCustomerB);
+		foreignReviewer.setRating(3d);
+		foreignReviewer.setDescription("foreign reviewer");
+		assertThat(exchange("/api/v1/private/customers/" + sharedCustomerA + "/reviews?store=" + STORE_A, HttpMethod.POST,
+				foreignReviewer, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
+
+		// store B's review id in the body of a store A create makes a new review
+		PersistableCustomerReview withForeignId = new PersistableCustomerReview();
+		withForeignId.setId(customerReviewB);
+		withForeignId.setCustomerId(reviewerA);
+		withForeignId.setRating(3d);
+		withForeignId.setDescription("store A customer review text");
+		assertThat(exchange("/api/v1/private/customers/" + sharedCustomerA + "/reviews?store=" + STORE_A, HttpMethod.POST,
+				withForeignId, admin).getStatusCode(), is(HttpStatus.CREATED));
+		ReadableCustomerReview[] reviewsA = customerReviewsOf(sharedCustomerA, STORE_A);
+		assertEquals(1, reviewsA.length);
+		assertNotEquals(customerReviewB, reviewsA[0].getId());
+		assertEquals(reviewerA, reviewsA[0].getCustomerId());
+
+		// update and delete of store B's real review through store A
+		PersistableCustomerReview change = new PersistableCustomerReview();
+		change.setCustomerId(reviewerA);
+		change.setRating(1d);
+		change.setDescription("changed");
+		assertThat(exchange("/api/v1/private/customers/" + onlyCustomerB + "/reviews/" + customerReviewB + "?store=" + STORE_A,
+				HttpMethod.PUT, change, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
+		assertThat(exchange("/api/v1/private/customers/" + onlyCustomerB + "/reviews/" + customerReviewB + "?store=" + STORE_A,
+				HttpMethod.DELETE, null, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
+		assertThat(exchange("/api/v1/private/customers/" + sharedCustomerA + "/reviews/" + customerReviewB + "?store=" + STORE_A,
+				HttpMethod.DELETE, null, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
+
+		// store B's review is unchanged
+		ReadableCustomerReview[] reviewsB = customerReviewsOf(onlyCustomerB, STORE_B);
+		assertEquals(1, reviewsB.length);
+		assertEquals(customerReviewB, reviewsB[0].getId());
+		assertEquals(sharedCustomerB, reviewsB[0].getCustomerId());
+		assertEquals(CUSTOMER_REVIEW_B, reviewsB[0].getDescription());
 	}
 
 	@Test
@@ -232,7 +329,7 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 
 		ResponseEntity<String> relatedA = exchange("/api/v1/product/" + productB + "/related?store=" + STORE_A,
 				HttpMethod.GET, null, jsonHeaders());
-		assertTrue(relatedA.getStatusCode().is2xxSuccessful() || relatedA.getStatusCode() == HttpStatus.NOT_FOUND);
+		assertThat(relatedA.getStatusCode(), is(HttpStatus.NOT_FOUND));
 		assertThat(String.valueOf(relatedA.getBody()), not(containsString("ISOB-RELATED")));
 
 		// the same reads on store B do return the data, so the result above is the scoping
@@ -256,6 +353,79 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 		ResponseEntity<String> reviewsB = exchange("/api/v1/product/" + productB + "/reviews?store=" + STORE_B,
 				HttpMethod.GET, null, jsonHeaders());
 		assertThat(reviewsB.getBody(), containsString("store B review text"));
+	}
+
+	@Test
+	public void productReviewsOfStoreBCannotBeWrittenThroughStoreA() {
+		HttpHeaders admin = getHeader();
+
+		// a review of store B's product posted through store A
+		PersistableProductReview onForeignProduct = new PersistableProductReview();
+		onForeignProduct.setCustomerId(sharedCustomerA);
+		onForeignProduct.setRating(2d);
+		onForeignProduct.setDescription("posted through store A");
+		assertThat(exchange("/api/v1/private/products/" + productB + "/reviews?store=" + STORE_A, HttpMethod.POST,
+				onForeignProduct, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
+
+		// a store A customer as reviewer of a store B product
+		PersistableProductReview foreignReviewer = new PersistableProductReview();
+		foreignReviewer.setCustomerId(sharedCustomerA);
+		foreignReviewer.setRating(2d);
+		foreignReviewer.setDescription("foreign reviewer");
+		assertThat(exchange("/api/v1/private/products/" + productB + "/reviews?store=" + STORE_B, HttpMethod.POST,
+				foreignReviewer, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
+
+		// update of store B's review through store A
+		PersistableProductReview change = new PersistableProductReview();
+		change.setCustomerId(onlyCustomerB);
+		change.setRating(1d);
+		change.setDescription("changed through store A");
+		assertThat(exchange("/api/v1/private/products/" + productB + "/reviews/" + reviewB + "?store=" + STORE_A,
+				HttpMethod.PUT, change, admin).getStatusCode(), is(HttpStatus.NOT_FOUND));
+
+		// an existing review id in a create body makes a new review, it does not overwrite
+		PersistableProductReview withExistingId = new PersistableProductReview();
+		withExistingId.setId(reviewB);
+		withExistingId.setCustomerId(sharedCustomerB);
+		withExistingId.setRating(5d);
+		withExistingId.setDescription("second store B review");
+		assertThat(exchange("/api/v1/private/products/" + productB + "/reviews?store=" + STORE_B, HttpMethod.POST,
+				withExistingId, admin).getStatusCode(), is(HttpStatus.CREATED));
+
+		String reviewsB = exchange("/api/v1/product/" + productB + "/reviews?store=" + STORE_B, HttpMethod.GET, null,
+				jsonHeaders()).getBody();
+		assertThat(reviewsB, containsString("store B review text"));
+		assertThat(reviewsB, not(containsString("posted through store A")));
+		assertThat(reviewsB, not(containsString("foreign reviewer")));
+		assertThat(reviewsB, not(containsString("changed through store A")));
+	}
+
+	@Test
+	public void customerCanOnlyChangeTheirOwnPassword() {
+		register("iso-pw-a@test.com", "pw-a-original1", STORE_A);
+		register("iso-pw-b@test.com", "pw-b-original1", STORE_A);
+		String tokenA = login("iso-pw-a@test.com", "pw-a-original1", STORE_A).getBody().getToken();
+
+		// customer A's token naming customer B, even with B's current password
+		PasswordRequest other = new PasswordRequest();
+		other.setUsername("iso-pw-b@test.com");
+		other.setCurrent("pw-b-original1");
+		other.setPassword("pw-b-hijacked1");
+		other.setRepeatPassword("pw-b-hijacked1");
+		assertThat(exchange("/api/v1/auth/customer/password?store=" + STORE_A, HttpMethod.POST, other, bearer(tokenA))
+				.getStatusCode(), is(HttpStatus.NOT_FOUND));
+		assertThat(login("iso-pw-b@test.com", "pw-b-original1", STORE_A).getStatusCode(), is(HttpStatus.OK));
+		assertThat(login("iso-pw-b@test.com", "pw-b-hijacked1", STORE_A).getStatusCode(), is(HttpStatus.UNAUTHORIZED));
+
+		// customer A changing their own password still works
+		PasswordRequest own = new PasswordRequest();
+		own.setUsername("iso-pw-a@test.com");
+		own.setCurrent("pw-a-original1");
+		own.setPassword("pw-a-changed1");
+		own.setRepeatPassword("pw-a-changed1");
+		assertThat(exchange("/api/v1/auth/customer/password?store=" + STORE_A, HttpMethod.POST, own, bearer(tokenA))
+				.getStatusCode(), is(HttpStatus.OK));
+		assertThat(login("iso-pw-a@test.com", "pw-a-changed1", STORE_A).getStatusCode(), is(HttpStatus.OK));
 	}
 
 	// ---------------------------------------------------------------- customer identity
@@ -307,8 +477,9 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 	}
 
 	@Test
-	public void registeringAnExistingEmailDoesNotRevealItOrCreateADuplicate() {
-		// existing account, wrong password: same status and shape, no token, nothing created
+	public void registeringAnExistingEmailCreatesNoDuplicateAndNamesNoAccount() {
+		// existing account, wrong password: same status and shape, no token, nothing created.
+		// A new email does get a token, so this is not full non-enumeration.
 		ResponseEntity<AuthenticationResponse> again = registerResponse(SHARED_EMAIL, "not-the-password1", STORE_A);
 		assertThat(again.getStatusCode(), is(HttpStatus.OK));
 		assertNotNull(again.getBody());
@@ -339,6 +510,14 @@ public class CustomerStoreIsolationIntegrationTest extends ServicesTestSupport {
 
 	private ResponseEntity<String> exchange(String url, HttpMethod method, Object body, HttpHeaders headers) {
 		return testRestTemplate.exchange(url, method, new HttpEntity<>(body, headers), String.class);
+	}
+
+	private ReadableCustomerReview[] customerReviewsOf(Long customerId, String store) {
+		ResponseEntity<ReadableCustomerReview[]> response = testRestTemplate.exchange(
+				"/api/v1/customers/" + customerId + "/reviews?store=" + store, HttpMethod.GET,
+				new HttpEntity<>(getHeader()), ReadableCustomerReview[].class);
+		assertThat(response.getStatusCode(), is(HttpStatus.OK));
+		return response.getBody();
 	}
 
 	private HttpHeaders jsonHeaders() {
