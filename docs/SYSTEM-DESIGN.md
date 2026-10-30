@@ -97,7 +97,7 @@ flowchart LR
 | Code risk | None. Proven with Flyway V1-V4 and the demo | Needs its own baseline, dialect fixes and a parallel test run |
 | Tenant isolation | Every query must filter by store | Row-level security can enforce the store filter in the database |
 | Search and recommendations | Needs OpenSearch | `pg_trgm` for small catalogs, `pgvector` for recommendations |
-| Concurrency | Good. Gap locks can surprise | MVCC without gap locks. `SKIP LOCKED` queues for the reconciler |
+| Concurrency | Good. `SKIP LOCKED` is available since 8.0. Gap locks under REPEATABLE READ can surprise | MVCC without gap locks. `SKIP LOCKED` as well, so neither engine wins on queues |
 | Managed options | RDS MySQL | RDS Postgres, Aurora Serverless v2 (scales to zero), or Supabase |
 
 **Decision:** stay on MySQL for this release and plan Postgres as its own project. Changing the hosting and the database in the same release doubles the blast radius of every incident. The migration plan has five steps:
