@@ -41,6 +41,7 @@ import com.stripe.model.Refund;
 import com.stripe.net.RequestOptions;
 import com.stripe.param.PaymentIntentCaptureParams;
 import com.stripe.param.PaymentIntentCreateParams;
+import com.stripe.param.RefundListParams;
 
 // import com.stripe.exception.APIConnectionException;
 
@@ -698,6 +699,52 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			return null;
 		}
 		return cleaned.length() > 10 ? cleaned.substring(0, 10).trim() : cleaned;
+	}
+
+	/**
+	 * The succeeded refunds of a charge as REFUND transactions (gateway refund id in
+	 * TRANSACTIONID), asked from Stripe rather than read from a webhook body: current
+	 * API versions no longer embed the refund list in the charge. Pending or failed
+	 * refunds are left out so the ledger only holds money that went back.
+	 */
+	public List<Transaction> succeededRefunds(IntegrationConfiguration configuration, String chargeId)
+			throws IntegrationException {
+		String apiKey = configuration.getIntegrationKeys().get("secretKey");
+		RefundListParams params = RefundListParams.builder().setCharge(chargeId).setLimit(100L).build();
+		List<Transaction> refunds = new ArrayList<>();
+		try {
+			for (Refund re : listRefunds(params, requestOptions(apiKey))) {
+				if (!"succeeded".equals(re.getStatus()) || re.getAmount() == null
+						|| StringUtils.isBlank(re.getCurrency())) {
+					continue;
+				}
+				Transaction refund = new Transaction();
+				refund.setAmount(StripeAmounts.fromMinorUnits(re.getAmount(), re.getCurrency()));
+				refund.setTransactionDate(new Date());
+				refund.setTransactionType(TransactionType.REFUND);
+				refund.setPaymentType(PaymentType.CREDITCARD);
+				refund.getTransactionDetails().put("TRANSACTIONID", re.getId());
+				refund.getTransactionDetails().put("TRNAPPROVED", re.getStatus());
+				refund.getTransactionDetails().put("TRNORDERNUMBER", re.getId());
+				refund.getTransactionDetails().put("REFUNDEDTRANSACTION",
+						StringUtils.defaultIfBlank(re.getPaymentIntent(), chargeId));
+				refund.getTransactionDetails().put("MESSAGETEXT", "recorded from Stripe");
+				refunds.add(refund);
+			}
+		} catch (StripeException e) {
+			throw new IntegrationException("Stripe refund list of " + chargeId + " failed", e);
+		}
+		return refunds;
+	}
+
+	/** A Stripe minor-unit amount for display, for example "12.34 USD". */
+	public static String displayAmount(long minor, String currency) {
+		return StripeAmounts.fromMinorUnits(minor, currency).toPlainString() + " " + currency.toUpperCase();
+	}
+
+	/** Lists refunds. Protected so tests can stub the network call. */
+	protected List<Refund> listRefunds(RefundListParams params, RequestOptions requestOptions) throws StripeException {
+		return Refund.list(params, requestOptions).getData();
 	}
 
 	/** Creates a PaymentIntent. Protected so tests can stub the network call. */
