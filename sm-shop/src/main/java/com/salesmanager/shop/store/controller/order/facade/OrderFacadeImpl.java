@@ -1642,6 +1642,18 @@ public class OrderFacadeImpl implements OrderFacade {
 		}
 	}
 
+	/** Same recipient rule as the status email: the order's address, else the customer's. */
+	private boolean hasEmailAddress(Order order) {
+		if (StringUtils.isNotBlank(order.getCustomerEmailAddress())) {
+			return true;
+		}
+		if (order.getCustomerId() == null) {
+			return false;
+		}
+		Customer customer = customerService.getById(order.getCustomerId());
+		return customer != null && StringUtils.isNotBlank(customer.getEmailAddress());
+	}
+
 	private boolean emailsEnabled() {
 		return "true".equals(coreConfiguration.getProperty("ORDER_EMAIL_API"));
 	}
@@ -1678,7 +1690,8 @@ public class OrderFacadeImpl implements OrderFacade {
 					+ "; only PAYMENT_PENDING and PAYMENT_REVIEW orders can be re-checked");
 		}
 		PendingOrderReconciler.Result result = pendingOrderReconciler.recheckOrder(orderId);
-		if (result.errors > 0 || result.lookupErrors > 0) {
+		boolean changed = result.finalised > 0 || result.failed > 0 || result.review > 0;
+		if (!changed && (result.errors > 0 || result.lookupErrors > 0)) {
 			throw new GenericRuntimeException("502",
 					"Could not get an answer from the payment gateway for order [" + orderId + "]; try again later");
 		}
@@ -1688,6 +1701,9 @@ public class OrderFacadeImpl implements OrderFacade {
 			message = "Payment confirmed; order is now " + after.getStatus();
 		} else if (result.failed > 0) {
 			message = "No payment was taken; order marked " + after.getStatus() + " and its stock returned";
+		} else if (result.review > 0) {
+			message = "The gateway gave no answer for too long; order moved to " + after.getStatus()
+					+ ". Re-check it later or cancel it";
 		} else {
 			message = "The gateway has not confirmed the payment yet; order stays " + after.getStatus();
 		}
@@ -1996,7 +2012,8 @@ public class OrderFacadeImpl implements OrderFacade {
 
 		history.setComments( messages.getMessage("email.order.status.changed", new String[] {String.valueOf(oldStatus),
 				newStatus.name()}, LocaleUtils.getLocale(store)));
-		history.setCustomerNotified(emailsEnabled() ? 1 : 0);
+		// 1 means the status email was queued; the send itself is asynchronous
+		history.setCustomerNotified(emailsEnabled() && hasEmailAddress(order) ? 1 : 0);
 		history.setStatus(newStatus);
 		history.setDateAdded(new Date() );
 

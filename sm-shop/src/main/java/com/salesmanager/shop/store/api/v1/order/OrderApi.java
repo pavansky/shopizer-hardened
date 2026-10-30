@@ -316,7 +316,7 @@ public class OrderApi {
 		Customer customer = customerService.getByNick(userName, merchantStore.getId());
 
 		if (customer == null) {
-			response.sendError(401, "Error while performing checkout customer not authorized");
+			response.sendError(401, "Error while getting the order, customer not authorized");
 			return null;
 		}
 
@@ -334,8 +334,9 @@ public class OrderApi {
 			return null;
 		}
 
-		if (order.getCustomer().getId() != null
-				&& order.getCustomer().getId().longValue() != customer.getId().longValue()) {
+		// an order without a customer id cannot be shown as anyone's own order
+		if (order.getCustomer().getId() == null
+				|| order.getCustomer().getId().longValue() != customer.getId().longValue()) {
 			LOGGER.error("Order is null for customer " + principal);
 			response.sendError(404, "Order is null for customer " + principal);
 			return null;
