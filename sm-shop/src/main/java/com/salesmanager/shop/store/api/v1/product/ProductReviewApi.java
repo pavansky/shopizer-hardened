@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 
 import com.salesmanager.core.business.services.catalog.product.ProductService;
 import com.salesmanager.core.business.services.catalog.product.review.ProductReviewService;
+import com.salesmanager.core.business.services.customer.CustomerService;
 import com.salesmanager.core.model.catalog.product.Product;
 import com.salesmanager.core.model.catalog.product.review.ProductReview;
 import com.salesmanager.core.model.customer.Customer;
@@ -48,6 +49,8 @@ public class ProductReviewApi {
   @Inject private ProductReviewService productReviewService;
 
   @Inject private CustomerFacade customerFacade;
+
+  @Inject private CustomerService customerService;
 
   /**
    * On customer facing /auth/ routes the reviewer is always the authenticated
@@ -106,8 +109,24 @@ public class ProductReviewApi {
     // The product comes from the path, not the body, so the duplicate check
     // below looks at the product actually being reviewed.
     review.setProductId(id);
+    // A create never updates: an id in the body would turn the save into an
+    // update of that review, whatever its store.
+    review.setId(null);
 
     try {
+      // Only products of the requested store, and on /private/ routes only a
+      // reviewer of the requested store. Anything else is not found.
+      if (productService.findOne(id, merchantStore) == null) {
+        response.sendError(404, "Product id " + id + " does not exists");
+        return null;
+      }
+      if (authCustomerId == null
+          && (review.getCustomerId() == null
+              || customerService.getById(review.getCustomerId(), merchantStore) == null)) {
+        response.sendError(404, "Customer id " + review.getCustomerId() + " does not exists");
+        return null;
+      }
+
       // rating already exist
       ProductReview prodReview =
           productReviewService.getByProductAndCustomer(
@@ -154,8 +173,9 @@ public class ProductReviewApi {
       HttpServletResponse response) {
 
     try {
-      // product exist
-      Product product = productService.getById(id);
+      // Only products of the requested store; another store's product id is
+      // reported as not found so its reviews are not listed here.
+      Product product = productService.findOne(id, merchantStore);
 
       if (product == null) {
         response.sendError(404, "Product id " + id + " does not exists");
@@ -203,7 +223,7 @@ public class ProductReviewApi {
 
     try {
       ProductReview prodReview = productReviewService.getById(reviewId);
-      if (prodReview == null) {
+      if (prodReview == null || productService.findOne(id, merchantStore) == null) {
         response.sendError(404, "Product review with id " + reviewId + " does not exist");
         return null;
       }
@@ -271,7 +291,10 @@ public class ProductReviewApi {
 
     try {
       ProductReview prodReview = productReviewService.getById(reviewId);
-      if (prodReview == null) {
+      // The product in the path must belong to the requested store; together
+      // with the product id check below this keeps a review of another store
+      // out of reach.
+      if (prodReview == null || productService.findOne(id, merchantStore) == null) {
         response.sendError(404, "Product review with id " + reviewId + " does not exist");
         return;
       }

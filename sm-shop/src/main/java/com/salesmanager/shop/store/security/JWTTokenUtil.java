@@ -65,6 +65,13 @@ public class JWTTokenUtil implements Serializable {
 	    public static final String TOKEN_TYPE_ADMIN = "admin";
 	    public static final String TOKEN_TYPE_CUSTOMER = "customer";
 
+	    /**
+	     * Claim holding the code of the store a customer token was issued for. A
+	     * customer account belongs to one store (the same email can exist in
+	     * several), so the token is only valid against that store.
+	     */
+	    public static final String CLAIM_KEY_STORE = "store";
+
 	    private static final String ROLE_ADMIN = "ROLE_" + Constants.PERMISSION_AUTHENTICATED;
 	    private static final String ROLE_CUSTOMER = "ROLE_" + Constants.PERMISSION_CUSTOMER_AUTHENTICATED;
 
@@ -167,6 +174,26 @@ public class JWTTokenUtil implements Serializable {
 
 	    public String getTokenTypeFromToken(String token) {
 	        return getClaimFromToken(token, c -> c.get(CLAIM_KEY_TOKEN_TYPE, String.class));
+	    }
+
+	    public String getStoreFromToken(String token) {
+	        return getClaimFromToken(token, c -> c.get(CLAIM_KEY_STORE, String.class));
+	    }
+
+	    /**
+	     * Customer token bound to the store the customer signed in to.
+	     */
+	    public String generateCustomerToken(UserDetails userDetails, String storeCode) {
+	        if (storeCode == null || storeCode.trim().isEmpty()) {
+	            throw new IllegalArgumentException("A customer token requires a store");
+	        }
+	        if (!TOKEN_TYPE_CUSTOMER.equals(resolveTokenType(userDetails))) {
+	            throw new IllegalArgumentException("Not a customer principal " + userDetails.getUsername());
+	        }
+	        Map<String, Object> claims = new HashMap<>();
+	        claims.put(CLAIM_KEY_TOKEN_TYPE, TOKEN_TYPE_CUSTOMER);
+	        claims.put(CLAIM_KEY_STORE, storeCode);
+	        return doGenerateToken(claims, userDetails.getUsername(), generateAudience());
 	    }
 
 	    /**

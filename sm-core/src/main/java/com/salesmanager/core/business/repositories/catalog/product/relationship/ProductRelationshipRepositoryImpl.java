@@ -49,6 +49,8 @@ public class ProductRelationshipRepositoryImpl implements ProductRelationshipRep
           + "left join fetch manuf.descriptions manufd "
           + "left join fetch rp.type type "
           + "where pr.code=:code "
+          + "and pr.store.id=:storeId "
+          + "and rpm.id=:storeId "
           + "and rp.available=:available "
           + "and p.id=:pId";
   private static final String HQL_GET_PRODUCTS_BY_PRODUCT_ID =
@@ -200,8 +202,11 @@ public class ProductRelationshipRepositoryImpl implements ProductRelationshipRep
   @Override
   @SuppressWarnings("unchecked")
   public List<ProductRelationship> getByType(MerchantStore store, String type, Product product) {
+    // Scoped to the store on both ends so a product id from another store
+    // returns nothing, and a relationship can never surface another store's product.
     return entityManager.createQuery(HQL_GET_BY_PRODUCT_ID_AND_CODE_AVAILABLE)
         .setParameter("code", type)
+        .setParameter("storeId", store.getId())
         .setParameter("available", true)
         .setParameter("pId", product.getId())
         .getResultList();

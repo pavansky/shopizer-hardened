@@ -136,12 +136,12 @@ class JWTTokenTypeTest {
 
 	@Test
 	void customerManagerRejectsAdminToken() throws Exception {
-		UserDetailsService uds = mock(UserDetailsService.class);
-		when(uds.loadUserByUsername(anyString())).thenReturn(CUSTOMER);
+		AbstractCustomerServices uds = mock(AbstractCustomerServices.class);
+		when(uds.loadUserByUsernameAndStore(anyString(), anyString())).thenReturn(CUSTOMER);
 		JWTCustomerAuthenticationManager mgr = new JWTCustomerAuthenticationManager();
 		ReflectionTestUtils.setField(mgr, "jwtCustomerDetailsService", uds);
 
 		assertNull(attempt(mgr, uds, util.generateToken(ADMIN)));
-		assertTrue(attempt(mgr, uds, util.generateToken(CUSTOMER)) != null);
+		assertTrue(attempt(mgr, uds, util.generateCustomerToken(CUSTOMER, "DEFAULT")) != null);
 	}
 }

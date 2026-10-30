@@ -53,8 +53,31 @@ public class CustomerServiceImpl extends SalesManagerEntityServiceImpl<Long, Cus
 	}
 	
 	@Override
+	public Customer getById(Long id, MerchantStore store) {
+		if (id == null || store == null || store.getId() == null) {
+			return null;
+		}
+		return customerRepository.findByIdAndStore(id, store.getId());
+	}
+
+	/**
+	 * A nick is unique per store, not globally. When the same nick exists in
+	 * several stores this lookup cannot tell which customer is meant, so it
+	 * returns null (callers treat that as not authorized) instead of failing
+	 * with a non-unique result. Use getByNick(nick, storeId) wherever the store
+	 * is known.
+	 */
+	@Override
 	public Customer getByNick(String nick) {
-		return customerRepository.findByNick(nick);	
+		long matches = customerRepository.countByNick(nick);
+		if (matches == 0) {
+			return null;
+		}
+		if (matches > 1) {
+			LOGGER.warn("Customer nick exists in {} stores; a store-scoped lookup is required", matches);
+			return null;
+		}
+		return customerRepository.findByNick(nick);
 	}
 	
 	@Override

@@ -60,8 +60,9 @@ public class ProductRelationshipApi {
       throws Exception {
 
     try {
-      // product exist
-      Product product = productService.getById(id);
+      // Only products of the requested store. Another store's product id is
+      // reported as not found, the same as an unknown id.
+      Product product = productService.findOne(id, merchantStore);
 
       if (product == null) {
         response.sendError(404, "Product id " + id + " does not exists");
