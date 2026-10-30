@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.ApplicationEventPublisherAware;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -37,7 +39,7 @@ import com.salesmanager.core.modules.integration.payment.model.GatewayPaymentSta
  * instances may run this job at the same time without settling an order twice.
  */
 @Component
-public class PendingOrderReconciler {
+public class PendingOrderReconciler implements ApplicationEventPublisherAware {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(PendingOrderReconciler.class);
 
@@ -55,6 +57,9 @@ public class PendingOrderReconciler {
 	private final ObjectProvider<ReconciliationMetrics> metrics;
 	private final PaymentAttemptService attempts;
 	private final PaymentGateways gateways;
+
+	/** Tells the shop layer that an order left PAYMENT_PENDING as paid, so it can send the confirmation. */
+	private ApplicationEventPublisher events;
 
 	@Value("${config.reconciliation.pendingOrders.enabled:true}")
 	private boolean enabled = true;
@@ -92,6 +97,11 @@ public class PendingOrderReconciler {
 		this.attempts = attempts;
 		this.gateways = gateways;
 		this.metrics = metrics;
+	}
+
+	@Override
+	public void setApplicationEventPublisher(ApplicationEventPublisher events) {
+		this.events = events;
 	}
 
 	/** Outcome counts of one run, returned for logging and tests. */
@@ -142,7 +152,7 @@ public class PendingOrderReconciler {
 				break;
 			}
 			for (Long id : ids) {
-				reconcileOne(id, result);
+				reconcileOne(id, result, false);
 				afterId = id;
 			}
 			if (ids.size() < batchSize) {
@@ -166,17 +176,32 @@ public class PendingOrderReconciler {
 	 */
 	public Result reconcileOrder(Long orderId) {
 		Result result = new Result();
-		reconcileOne(orderId, result);
+		reconcileOne(orderId, result, false);
 		return result;
 	}
 
-	private void reconcileOne(Long orderId, Result result) {
+	/**
+	 * Re-check requested by a person from the admin. Same rules as
+	 * {@link #reconcileOrder(Long)}, but an order in PAYMENT_REVIEW may also be
+	 * settled: the scheduled run never touches those, so without this a late
+	 * gateway answer could not settle them.
+	 */
+	public Result recheckOrder(Long orderId) {
+		Result result = new Result();
+		reconcileOne(orderId, result, true);
+		return result;
+	}
+
+	private void reconcileOne(Long orderId, Result result, boolean fromReview) {
 		try {
 			if (queries.hasSuccessfulPayment(orderId) || attempts.hasSucceeded(orderId)) {
-				count(steps.reconcilePaidOrder(orderId, PAID_COMMENT), result, () -> {
+				boolean claimed = fromReview ? steps.reconcilePaidOrder(orderId, PAID_COMMENT, true)
+						: steps.reconcilePaidOrder(orderId, PAID_COMMENT);
+				count(claimed, result, () -> {
 					result.finalised++;
 					metrics.ifAvailable(ReconciliationMetrics::finalised);
 					LOGGER.info("Order {} reconciled: payment found, order finalised", orderId);
+					paid(orderId);
 				});
 				return;
 			}
@@ -184,10 +209,10 @@ public class PendingOrderReconciler {
 			if (attempt == null || attempt.getStatus() == PaymentAttemptStatus.FAILED) {
 				// No attempt means the gateway was never called (or the order predates
 				// attempts); a FAILED attempt is a definitive decline.
-				failOrder(orderId, UNPAID_REASON, null, result);
+				failOrder(orderId, UNPAID_REASON, null, result, fromReview);
 				return;
 			}
-			resolveWithGateway(orderId, attempt, result);
+			resolveWithGateway(orderId, attempt, result, fromReview);
 		} catch (Exception e) {
 			result.errors++;
 			metrics.ifAvailable(ReconciliationMetrics::error);
@@ -196,7 +221,8 @@ public class PendingOrderReconciler {
 	}
 
 	/** The attempt is INITIATED or UNKNOWN: only the gateway can say whether money was taken. */
-	private void resolveWithGateway(Long orderId, PaymentAttempt attempt, Result result) throws Exception {
+	private void resolveWithGateway(Long orderId, PaymentAttempt attempt, Result result, boolean fromReview)
+			throws Exception {
 		GatewayPaymentStatus status;
 		try {
 			status = gateways.lookup(attempt);
@@ -210,21 +236,26 @@ public class PendingOrderReconciler {
 		}
 		switch (status.getOutcome()) {
 		case SUCCEEDED:
-			count(steps.reconcileConfirmedPayment(orderId, attempt.getId(), paymentTransaction(attempt, status),
-					CONFIRMED_COMMENT), result, () -> {
-						result.finalised++;
-						result.confirmed++;
-						metrics.ifAvailable(ReconciliationMetrics::confirmedByGateway);
-						LOGGER.warn("Order {} reconciled: gateway confirmed payment {} that was never recorded",
-								orderId, status.getGatewayTransactionId());
-					});
+			Transaction payment = paymentTransaction(attempt, status);
+			boolean claimed = fromReview
+					? steps.reconcileConfirmedPayment(orderId, attempt.getId(), payment, CONFIRMED_COMMENT, true)
+					: steps.reconcileConfirmedPayment(orderId, attempt.getId(), payment, CONFIRMED_COMMENT);
+			count(claimed, result, () -> {
+				result.finalised++;
+				result.confirmed++;
+				metrics.ifAvailable(ReconciliationMetrics::confirmedByGateway);
+				LOGGER.warn("Order {} reconciled: gateway confirmed payment {} that was never recorded",
+						orderId, status.getGatewayTransactionId());
+				paid(orderId);
+			});
 			break;
 		case FAILED:
-			failOrder(orderId, GATEWAY_FAILED_REASON + " (" + status.getDetail() + ")", attempt.getId(), result);
+			failOrder(orderId, GATEWAY_FAILED_REASON + " (" + status.getDetail() + ")", attempt.getId(), result,
+					fromReview);
 			break;
 		case NOT_FOUND:
 			if (olderThan(attempt, notFoundSafeMinutes)) {
-				failOrder(orderId, NOT_FOUND_REASON, attempt.getId(), result);
+				failOrder(orderId, NOT_FOUND_REASON, attempt.getId(), result, fromReview);
 			} else {
 				result.waiting++;
 			}
@@ -248,15 +279,36 @@ public class PendingOrderReconciler {
 		});
 	}
 
-	private void failOrder(Long orderId, String reason, Long attemptId, Result result) {
-		boolean claimed = attemptId == null ? steps.reconcileUnpaidOrder(orderId, reason)
-				: steps.reconcileUnpaidOrder(orderId, reason, attemptId);
+	private void failOrder(Long orderId, String reason, Long attemptId, Result result, boolean fromReview) {
+		boolean claimed;
+		if (fromReview) {
+			claimed = steps.reconcileUnpaidOrder(orderId, reason, attemptId, true);
+		} else {
+			claimed = attemptId == null ? steps.reconcileUnpaidOrder(orderId, reason)
+					: steps.reconcileUnpaidOrder(orderId, reason, attemptId);
+		}
 		count(claimed, result, () -> {
 			result.failed++;
 			metrics.ifAvailable(ReconciliationMetrics::failed);
 			LOGGER.info("Order {} reconciled: {}, marked PAYMENT_FAILED", orderId, reason);
 			releaseKeys(orderId);
 		});
+	}
+
+	/**
+	 * The checkout never sent a confirmation for an order that was still
+	 * PAYMENT_PENDING when the request ended; the shop sends it on this event.
+	 * A failure here must not undo or hide the settlement, so it is only logged.
+	 */
+	private void paid(Long orderId) {
+		if (events == null) {
+			return;
+		}
+		try {
+			events.publishEvent(new PendingOrderPaidEvent(orderId));
+		} catch (RuntimeException e) {
+			LOGGER.error("Order " + orderId + " settled but its confirmation could not be queued", e);
+		}
 	}
 
 	private void count(boolean claimed, Result result, Runnable onClaimed) {
