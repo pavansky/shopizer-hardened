@@ -73,7 +73,6 @@ public class ProductSlugLookupTest extends AbstractSalesManagerCoreTestCase {
 		Assert.assertTrue(Hibernate.isInitialized(foundA.getAvailabilities()));
 		Assert.assertTrue(Hibernate.isInitialized(foundA.getAttributes()));
 		Assert.assertTrue(Hibernate.isInitialized(foundA.getVariants()));
-		Assert.assertTrue(Hibernate.isInitialized(foundA.getRelationships()));
 	}
 
 	@Test

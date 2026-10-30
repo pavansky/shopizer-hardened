@@ -105,8 +105,12 @@ public class ProductRepositoryImpl implements ProductRepositoryCustom {
 	private Product loadDetail(Long productId, List<Integer> storeIds) {
 		return inPersistenceContext(() -> {
 			StringBuilder qs = new StringBuilder();
+			// descriptions come with the product row (one row per description, no pagination),
+			// which saves ProductGraph a statement that would select the product again; no
+			// distinct, because SQL DISTINCT would compare the description text columns
 			qs.append("select p from Product as p ");
 			qs.append("join fetch p.merchantStore merch ");
+			qs.append("left join fetch p.descriptions pdesc ");
 			qs.append("left join fetch p.type type ");
 			qs.append("left join fetch p.manufacturer manuf ");
 			qs.append("left join fetch p.taxClass tx ");
@@ -127,8 +131,10 @@ public class ProductRepositoryImpl implements ProductRepositoryCustom {
 			if (found.isEmpty()) {
 				return null;
 			}
-			ProductGraph.initialize(this.em, found, ProductGraph.Depth.DETAIL);
-			return found.get(0);
+			// one row per description, all the same product
+			Product product = found.get(0);
+			ProductGraph.initialize(this.em, Collections.singletonList(product), ProductGraph.Depth.DETAIL);
+			return product;
 		});
 	}
 

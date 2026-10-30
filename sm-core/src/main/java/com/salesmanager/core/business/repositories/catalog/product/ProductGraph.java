@@ -30,7 +30,7 @@ import com.salesmanager.core.model.catalog.product.variation.ProductVariation;
  * products could not be paged in SQL.
  *
  * Here each top-level collection is fetched by its own statement for all the products at
- * once (descriptions; availabilities with prices; images; categories with descriptions;
+ * once (descriptions, unless the caller fetched them with the products; availabilities with prices; images; categories with descriptions;
  * attributes with option and value; variants), so a statement never multiplies two
  * collections of the product. The remaining small associations (option and value
  * descriptions, variant prices and images) are initialized afterwards and load in batches
@@ -40,7 +40,10 @@ import com.salesmanager.core.model.catalog.product.variation.ProductVariation;
  */
 final class ProductGraph {
 
-	/** what a listing card needs */
+	/**
+	 * what a listing card needs; DETAIL is the product page, which reads the same graph as
+	 * a shop listing card (product relationships are not read by any mapper, so they stay lazy)
+	 */
 	enum Depth { LISTING, LISTING_WITH_OPTIONS, DETAIL }
 
 	private ProductGraph() {
@@ -54,7 +57,9 @@ final class ProductGraph {
 		for (Product p : products) {
 			ids.add(p.getId());
 		}
-		fetch(em, ids, "left join fetch p.descriptions");
+		if (!descriptionsLoaded(products)) {
+			fetch(em, ids, "left join fetch p.descriptions");
+		}
 		fetch(em, ids, "left join fetch p.availabilities pa left join fetch pa.prices pap left join fetch pap.descriptions");
 		fetch(em, ids, "left join fetch p.images");
 		fetch(em, ids, "left join fetch p.categories c left join fetch c.descriptions");
@@ -62,9 +67,6 @@ final class ProductGraph {
 			fetch(em, ids, "left join fetch p.attributes a left join fetch a.productOption left join fetch a.productOptionValue");
 			fetch(em, ids, "left join fetch p.variants v left join fetch v.variation left join fetch v.variationValue "
 					+ "left join fetch v.productVariantGroup");
-		}
-		if (depth == Depth.DETAIL) {
-			fetch(em, ids, "left join fetch p.relationships");
 		}
 
 		// what the statements above did not reach is loaded in batches here; for what they
@@ -104,11 +106,16 @@ final class ProductGraph {
 				}
 			}
 		}
-		if (depth == Depth.DETAIL) {
-			for (Product p : products) {
-				Hibernate.initialize(p.getRelationships());
+	}
+
+	/** the product page loader fetches descriptions with the product itself */
+	private static boolean descriptionsLoaded(Collection<Product> products) {
+		for (Product p : products) {
+			if (!Hibernate.isInitialized(p.getDescriptions())) {
+				return false;
 			}
 		}
+		return true;
 	}
 
 	/** one statement: the products with one collection path, all ids at once */
