@@ -1,9 +1,11 @@
 package com.salesmanager.core.business.services.tax;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
@@ -24,6 +26,27 @@ class TaxCalculatorTest {
 	void discountLargerThanTheLinesIsCapped() {
 		assertEquals(amounts("0.00", "0.00"),
 				TaxCalculator.allocateDiscount(amounts("20.00", "10.00"), new BigDecimal("50.00")));
+	}
+
+	@Test
+	void roundingNeverPushesALineBelowZero() {
+		// ten 0.01 lines, 0.05 off: each exact share is 0.005, HALF_UP 0.01,
+		// which over-allocates; the excess is given back by the largest lines
+		List<BigDecimal> lines = Collections.nCopies(10, new BigDecimal("0.01"));
+		List<BigDecimal> result = TaxCalculator.allocateDiscount(lines, new BigDecimal("0.05"));
+
+		// the discounted lines add up to 0.10 - 0.05
+		assertEquals(new BigDecimal("0.05"), sum(result));
+		result.forEach(line -> assertTrue(line.signum() >= 0 && line.compareTo(new BigDecimal("0.01")) <= 0));
+	}
+
+	@Test
+	void fullDiscountOnUnroundedPricesLeavesEveryLineAtZero() {
+		// shares round down to 1.00, the old remainder put the last line at -0.008
+		List<BigDecimal> result = TaxCalculator.allocateDiscount(
+				amounts("1.004", "1.004", "1.005"), new BigDecimal("3.013"));
+
+		result.forEach(line -> assertEquals(0, line.signum(), "line " + line));
 	}
 
 	@Test
@@ -51,6 +74,10 @@ class TaxCalculatorTest {
 		rate.setTaxRate(new BigDecimal(percent));
 		rate.setPiggyback(piggyback);
 		return rate;
+	}
+
+	private static BigDecimal sum(List<BigDecimal> values) {
+		return values.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
 	}
 
 	private static List<BigDecimal> amounts(String... values) {
