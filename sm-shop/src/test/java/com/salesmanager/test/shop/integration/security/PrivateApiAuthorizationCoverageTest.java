@@ -163,6 +163,18 @@ class PrivateApiAuthorizationCoverageTest extends ServicesTestSupport {
 		assertEquals(HttpStatus.FORBIDDEN, call(HttpMethod.PUT, "/api/v1/private/store/DEFAULT", "{}", catalog));
 		assertEquals(HttpStatus.FORBIDDEN, call(HttpMethod.GET, "/api/v1/private/customers", null, catalog));
 
+		// the password rule is self service only: even with the right current password a
+		// staff member cannot change the superadmin's (user 1) password
+		HttpHeaders json = new HttpHeaders();
+		json.putAll(catalog);
+		json.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+		com.salesmanager.shop.model.user.UserPassword takeover = new com.salesmanager.shop.model.user.UserPassword();
+		takeover.setPassword("password");
+		takeover.setChangePassword("taken-over");
+		assertEquals(HttpStatus.FORBIDDEN, call(HttpMethod.PATCH, "/api/v1/private/user/1/password", takeover, json));
+		assertEquals("[@selfUser.isSelf(authentication, #id) or hasAuthority('SUPERADMIN')]",
+				accessFor("PATCH", "/api/v1/private/user/1/password"));
+
 		// the demo superadmin keeps full access
 		HttpHeaders superadmin = getHeader();
 		assertEquals(HttpStatus.OK, call(HttpMethod.GET, "/api/v1/private/orders", null, superadmin));

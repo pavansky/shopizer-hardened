@@ -34,6 +34,7 @@ import com.salesmanager.shop.store.security.ServicesAuthenticationSuccessHandler
 import com.salesmanager.shop.store.security.abuse.ClientIpResolver;
 import com.salesmanager.shop.store.security.abuse.LockoutAuthenticationProvider;
 import com.salesmanager.shop.store.security.abuse.LoginAttemptTracker;
+import com.salesmanager.shop.store.security.admin.AdminSelfAccess;
 import com.salesmanager.shop.store.security.admin.JWTAdminAuthenticationProvider;
 import com.salesmanager.shop.store.security.audit.AdminAuditFilter;
 import com.salesmanager.shop.store.security.admin.JWTAdminServicesImpl;
@@ -91,6 +92,12 @@ public class MultipleEntryPointsSecurityConfig {
 	@Bean
 	public CustomerFacade customerFacade() {
 		return new com.salesmanager.shop.store.controller.customer.facade.CustomerFacadeImpl();
+	}
+
+	/** {@code @selfUser.isSelf(authentication, #id)} in the admin URL rules. */
+	@Bean("selfUser")
+	public AdminSelfAccess selfUser() {
+		return new AdminSelfAccess();
 	}
 
 	
@@ -393,9 +400,12 @@ public class MultipleEntryPointsSecurityConfig {
 					.antMatchers(p + "/refresh").permitAll()
 					.antMatchers(HttpMethod.OPTIONS, p + "/**").permitAll()
 
-					// self service: own profile, own password (the current password is checked)
+					// self service: own profile, own password (the current password is checked).
+					// Only a superadmin may change someone else's password: otherwise any
+					// staff member could guess the current password of a stronger account.
 					.antMatchers(HttpMethod.GET, p + "/user/profile").access(staff)
-					.antMatchers(HttpMethod.PATCH, p + "/user/*/password").access(staff)
+					.antMatchers(HttpMethod.PATCH, p + "/user/{id}/password")
+							.access("@selfUser.isSelf(authentication, #id) or hasAuthority('SUPERADMIN')")
 
 					// staff accounts, groups and permissions
 					.antMatchers(p + "/user/**", p + "/users/**").access(admin)
