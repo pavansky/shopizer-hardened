@@ -44,7 +44,6 @@ import com.salesmanager.shop.store.security.admin.AdminTokenRefreshGuard;
 import com.salesmanager.shop.store.security.admin.JWTAdminAuthenticationProvider;
 import com.salesmanager.shop.store.security.audit.AdminAuditFilter;
 import com.salesmanager.shop.store.security.admin.JWTAdminServicesImpl;
-import com.salesmanager.shop.store.security.customer.JWTCustomerAuthenticationProvider;
 import com.salesmanager.shop.store.security.services.CredentialsService;
 import com.salesmanager.shop.store.security.services.CredentialsServiceImpl;
 
@@ -419,7 +418,7 @@ public class MultipleEntryPointsSecurityConfig {
 		 */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-			auth.authenticationProvider(new LockoutAuthenticationProvider("admin", authenticationProvider(),
+			auth.authenticationProvider(new LockoutAuthenticationProvider("admin", adminAuthenticationProvider(),
 					loginAttemptTracker, clientIpResolver));
 		}
 		
@@ -532,8 +531,13 @@ public class MultipleEntryPointsSecurityConfig {
 					p + "/catalogs", p + "/manufacturer/**", p + "/manufacturers" };
 		}
 
+		/**
+		 * Named for the admin chain only. It used to share the bean name
+		 * authenticationProvider with a customer provider, and bean overriding
+		 * decided which one admin login used.
+		 */
 	    @Bean
-	    public AuthenticationProvider authenticationProvider() {
+	    public AuthenticationProvider adminAuthenticationProvider() {
 	    	JWTAdminAuthenticationProvider provider = new JWTAdminAuthenticationProvider();
 	        provider.setUserDetailsService(jwtUserDetailsService);
 	        return provider;
@@ -644,13 +648,6 @@ public class MultipleEntryPointsSecurityConfig {
 
 		}
 		
-	    @Bean
-	    public AuthenticationProvider authenticationProvider() {
-	    	JWTCustomerAuthenticationProvider provider = new JWTCustomerAuthenticationProvider();
-	        provider.setUserDetailsService(jwtCustomerDetailsService);
-	        return provider;
-	    }
-
 		@Bean
 		public AuthenticationEntryPoint apiCustomerAuthenticationEntryPoint() {
 			BasicAuthenticationEntryPoint entryPoint = new BasicAuthenticationEntryPoint();
