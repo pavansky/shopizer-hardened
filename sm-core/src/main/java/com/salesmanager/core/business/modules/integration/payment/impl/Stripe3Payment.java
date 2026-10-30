@@ -50,6 +50,9 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 	private final static String AUTHORIZATION = "Authorization";
 	private final static String TRANSACTION = "Transaction";
 
+	/** Payment metadata key of the cart a PaymentIntent is created for; sent to Stripe as cart_code. */
+	public static final String META_CART_CODE = "cartCode";
+
 
 	@Override
 	public Transaction initTransaction(MerchantStore store, Customer customer,
@@ -77,16 +80,25 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 
 			RequestOptions requestOptions = requestOptions(apiKey);
 
-			PaymentIntentCreateParams createParams = new PaymentIntentCreateParams.Builder()
+			// No redirect-based methods: the storefront confirms with redirect 'if_required' and
+			// has no return page to resume from. Cards run 3-D Secure in place when the issuer asks.
+			PaymentIntentCreateParams.Builder create = new PaymentIntentCreateParams.Builder()
 					.setCurrency(store.getCurrency().getCode())
 					.setAmount(minorAmount)
 					.setCaptureMethod(PaymentIntentCreateParams.CaptureMethod.MANUAL)
-					.build();
+					.setAutomaticPaymentMethods(PaymentIntentCreateParams.AutomaticPaymentMethods.builder()
+							.setEnabled(true)
+							.setAllowRedirects(PaymentIntentCreateParams.AutomaticPaymentMethods.AllowRedirects.NEVER)
+							.build());
+			String cartCode = payment.getPaymentMetaData() == null ? null
+					: payment.getPaymentMetaData().get(META_CART_CODE);
+			if (StringUtils.isNotBlank(cartCode)) {
+				create.putMetadata("cart_code", cartCode);
+			}
+			PaymentIntentCreateParams createParams = create.build();
 
 			// Create a PaymentIntent with the order amount and currency
-			PaymentIntent intent = PaymentIntent.create(createParams, requestOptions);
-
-			intent.getClientSecret();
+			PaymentIntent intent = createPaymentIntent(createParams, requestOptions);
 
 			transaction.setAmount(amount);
 			//transaction.setOrder(order);
@@ -670,6 +682,12 @@ public class Stripe3Payment implements PaymentModule, PaymentStatusLookup, Payme
 			return null;
 		}
 		return cleaned.length() > 10 ? cleaned.substring(0, 10).trim() : cleaned;
+	}
+
+	/** Creates a PaymentIntent. Protected so tests can stub the network call. */
+	protected PaymentIntent createPaymentIntent(PaymentIntentCreateParams params, RequestOptions requestOptions)
+			throws StripeException {
+		return PaymentIntent.create(params, requestOptions);
 	}
 
 	/** Retrieves a PaymentIntent. Protected so tests can stub the network call. */
