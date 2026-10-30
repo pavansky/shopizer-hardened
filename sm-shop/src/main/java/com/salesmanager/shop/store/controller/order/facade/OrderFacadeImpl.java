@@ -1979,6 +1979,13 @@ public class OrderFacadeImpl implements OrderFacade {
 		}
 		// rejects anything not in the transition table (IllegalOrderStatusTransitionException -> 409)
 		OrderStatusTransitions.check(oldStatus, newStatus);
+		if (!OrderCommandService.STATUS_UPDATE_SOURCES.contains(oldStatus)) {
+			// no payment is recorded for this order; marking it ORDERED or PROCESSED by hand would
+			// settle it without money and leave its payment attempt open
+			throw new ConflictException("Order id [" + order.getId() + "] is " + oldStatus
+					+ " and has no settled payment; use POST /private/orders/" + order.getId()
+					+ "/payment/recheck to settle it with the gateway, or /cancel");
+		}
 		order.setStatus(newStatus);
 		OrderStatusHistory history = new OrderStatusHistory();
 

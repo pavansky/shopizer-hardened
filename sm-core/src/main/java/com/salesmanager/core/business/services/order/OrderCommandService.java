@@ -24,9 +24,22 @@ public interface OrderCommandService {
 	Set<OrderStatus> STATUS_UPDATE_TARGETS = Collections
 			.unmodifiableSet(EnumSet.of(OrderStatus.ORDERED, OrderStatus.PROCESSED, OrderStatus.DELIVERED));
 
+	/**
+	 * Sources a plain status update may move from: an order whose payment is
+	 * settled. A PAYMENT_PENDING or PAYMENT_REVIEW order has no recorded payment,
+	 * so marking it ORDERED or PROCESSED by hand would ship goods nobody paid for
+	 * and leave its payment attempt open; it goes through the payment re-check
+	 * or cancel instead.
+	 */
+	Set<OrderStatus> STATUS_UPDATE_SOURCES = Collections
+			.unmodifiableSet(EnumSet.of(OrderStatus.ORDERED, OrderStatus.PROCESSED, OrderStatus.DELIVERED));
+
 	/** Statuses a plain status update can move this status to. */
 	static Set<OrderStatus> statusUpdatesFrom(OrderStatus current) {
 		Set<OrderStatus> next = EnumSet.noneOf(OrderStatus.class);
+		if (!STATUS_UPDATE_SOURCES.contains(current)) {
+			return next;
+		}
 		for (OrderStatus s : OrderStatusTransitions.allowedFrom(current)) {
 			if (STATUS_UPDATE_TARGETS.contains(s)) {
 				next.add(s);

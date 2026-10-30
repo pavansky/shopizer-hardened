@@ -274,7 +274,7 @@ public class PendingOrderReconciler implements ApplicationEventPublisherAware {
 			result.review++;
 			metrics.ifAvailable(ReconciliationMetrics::review);
 			LOGGER.error("Order {} moved to PAYMENT_REVIEW: payment attempt {} has no gateway answer after {}"
-					+ " minutes ({}). Check the gateway and settle the order by hand.", orderId,
+					+ " minutes ({}). Check the gateway, then re-check the payment or cancel the order.", orderId,
 					attempt.getAttemptRef(), reviewAfterMinutes, why);
 		});
 	}

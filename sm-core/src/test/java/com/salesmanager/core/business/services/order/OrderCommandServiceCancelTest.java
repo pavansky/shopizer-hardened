@@ -238,7 +238,12 @@ class OrderCommandServiceCancelTest {
 		assertTrue(OrderCommandService.statusUpdatesFrom(OrderStatus.ORDERED)
 				.equals(java.util.EnumSet.of(OrderStatus.PROCESSED, OrderStatus.DELIVERED)));
 		assertTrue(OrderCommandService.statusUpdatesFrom(OrderStatus.DELIVERED).isEmpty());
-		assertTrue(OrderCommandService.statusUpdatesFrom(OrderStatus.PAYMENT_REVIEW)
-				.equals(java.util.EnumSet.of(OrderStatus.ORDERED, OrderStatus.PROCESSED)));
+		assertTrue(OrderCommandService.statusUpdatesFrom(OrderStatus.PROCESSED)
+				.equals(java.util.EnumSet.of(OrderStatus.DELIVERED)));
+		// no payment recorded yet: only the re-check or cancel can move these
+		assertTrue(OrderCommandService.statusUpdatesFrom(OrderStatus.PAYMENT_PENDING).isEmpty());
+		assertTrue(OrderCommandService.statusUpdatesFrom(OrderStatus.PAYMENT_REVIEW).isEmpty());
+		assertTrue(OrderCommandService.statusUpdatesFrom(OrderStatus.PAYMENT_FAILED).isEmpty());
+		assertTrue(OrderCommandService.statusUpdatesFrom(null).isEmpty());
 	}
 }
