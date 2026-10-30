@@ -65,6 +65,20 @@ public class DataConfiguration {
     @Value("${db.maxPoolSize}")
     private int maxPoolSize;
 
+    /**
+     * Lazy associations are loaded for up to this many owners in one select. The product
+     * loaders rely on it to replace their collection fetch joins.
+     */
+    @Value("${hibernate.default_batch_fetch_size:50}")
+    private String batchFetchSize;
+
+    /**
+     * true in the test configuration: a query that pages over a collection fetch, which
+     * Hibernate can only page in memory after reading every row (HHH000104), fails.
+     */
+    @Value("${hibernate.query.fail_on_pagination_over_collection_fetch:false}")
+    private String failOnCollectionFetchPagination;
+
     @Bean
     public HikariDataSource dataSource() {
     	HikariDataSource dataSource = DataSourceBuilder.create().type(HikariDataSource.class)
@@ -111,6 +125,8 @@ public class DataConfiguration {
         hibernateProperties.setProperty("hibernate.connection.useUnicode", "true");
         hibernateProperties.setProperty("hibernate.id.new_generator_mappings", "false"); //unless you run on a new schema
         hibernateProperties.setProperty("hibernate.generate_statistics", "false");
+        hibernateProperties.setProperty("hibernate.default_batch_fetch_size", batchFetchSize);
+        hibernateProperties.setProperty("hibernate.query.fail_on_pagination_over_collection_fetch", failOnCollectionFetchPagination);
         // hibernateProperties.setProperty("hibernate.globally_quoted_identifiers", "true");
         return hibernateProperties;
     }
