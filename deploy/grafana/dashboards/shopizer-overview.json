@@ -212,7 +212,7 @@
     },
     {
       "id": 9,
-      "title": "Hours since the last good backup (alert at 7)",
+      "title": "Hours since the last good backup (alert at 7, 'never' = none yet)",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -227,7 +227,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(time() - shopizer_backup_last_success_timestamp_seconds) / 3600",
+          "expr": "(time() - (shopizer_backup_last_success_timestamp_seconds > 0)) / 3600",
           "legendFormat": "backup age"
         }
       ],
@@ -247,7 +247,8 @@
                 "value": 7
               }
             ]
-          }
+          },
+          "noValue": "never"
         },
         "overrides": []
       }
