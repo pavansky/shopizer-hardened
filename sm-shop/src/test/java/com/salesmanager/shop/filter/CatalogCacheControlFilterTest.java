@@ -24,7 +24,11 @@ public class CatalogCacheControlFilterTest {
 		for (String path : new String[] { "/api/v1/products", "/api/v1/products/", "/api/v1/product/oak-bench",
 				"/api/v2/product/oak-bench", "/api/v1/category/furniture", "/api/v1/category",
 				"/api/v1/store/DEFAULT", "/api/v1/config", "/api/v1/content/pages/about",
-				"/api/v1/product/12/reviews" }) {
+				"/api/v1/product/12/reviews", "/api/v1/product/12/related", "/api/v1/products/group/featured",
+				"/api/v1/category/product/12", "/api/v1/category/3/manufacturer", "/api/v1/store/languages",
+				"/api/v1/content/summary", "/api/v1/content/boxes/footer", "/api/v2/products",
+				"/api/v2/products/category/chairs", "/api/v2/product/name/oak-bench", "/api/v2/product/SKU-1",
+				"/api/v2/category/3/variations" }) {
 			assertEquals(path, CatalogCacheControlFilter.PUBLIC_CATALOG, run("GET", path, null, 200));
 		}
 		assertEquals(CatalogCacheControlFilter.PUBLIC_CATALOG, run("HEAD", "/api/v1/products", null, 200));
@@ -41,6 +45,11 @@ public class CatalogCacheControlFilterTest {
 		assertNull(run("GET", "/api/v1/customers/4/reviews", null, 200));
 		assertNull(run("GET", "/api/v1/orders/1", null, 200));
 		assertNull(run("GET", "/api/v1/languages", null, 200));
+		// not catalog reads although they sit under catalog prefixes
+		assertNull(run("GET", "/api/v1/store/DEFAULT/signup/abc-token", null, 200));
+		assertNull(run("GET", "/api/v1/store/unique", null, 200));
+		assertNull(run("GET", "/api/v1/content/images/download", null, 200));
+		assertNull(run("GET", "/api/v1/product/12/variants/unknown/route", null, 200));
 		assertNull(run("POST", "/api/v1/products", null, 200));
 		assertNull(run("POST", "/api/v1/product/3/price", null, 200));
 	}

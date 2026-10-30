@@ -25,9 +25,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * (max-age=0), shared caches keep the response for 60 s and may serve it stale for 5
  * minutes while they refetch it.
  *
- * Anything else keeps the no-store default: requests with an Authorization header,
- * /private and /auth paths, cart, checkout, customer and order endpoints, and every
- * response with an error status.
+ * Only the routes listed in {@link #CATALOG_READ} qualify. Anything else keeps the
+ * no-store default: requests with an Authorization header, /private and /auth paths,
+ * cart, checkout, customer and order endpoints, other GETs under the same prefixes, and
+ * every response with an error status.
  *
  * Product responses still carry the exact stock quantity, so a cached page can show a
  * count up to a minute old. Checkout checks stock again, so this only affects display.
@@ -38,11 +39,42 @@ public class CatalogCacheControlFilter extends OncePerRequestFilter {
 	static final String PUBLIC_CATALOG = "public, max-age=0, s-maxage=60, stale-while-revalidate=300";
 	static final String NO_STORE = "no-cache, no-store, max-age=0, must-revalidate";
 
-	/** public catalog reads: /api/v1|v2/products, /product, /category, /store, /config, /content */
-	private static final Pattern CATALOG_READ = Pattern
-			.compile("^/api/v[12]/(products?|category|categories|store|config|content)(/.*)?$");
+	private static final String SEG = "[^/]+";
 
-	/** never shared, even under a catalog prefix */
+	/**
+	 * The public catalog read routes, listed one by one rather than matched by prefix, so
+	 * other GETs under the same prefixes (store signup tokens, the store-code uniqueness
+	 * check, anything added later) stay no-store unless they are added here on purpose.
+	 */
+	private static final Pattern CATALOG_READ = Pattern.compile("^(?:"
+			// v1 products: list, by id, group, by slug or id, friendly, reviews, related, images
+			+ "/api/v1/products/?"
+			+ "|/api/v1/products/" + SEG
+			+ "|/api/v1/products/group/" + SEG
+			+ "|/api/v1/product/" + SEG
+			+ "|/api/v1/product/friendly/" + SEG
+			+ "|/api/v1/product/" + SEG + "/(?:reviews|related|images)"
+			// v1 categories: list, by id or slug, of a product, manufacturers of a category
+			+ "|/api/v1/category/?"
+			+ "|/api/v1/category/" + SEG
+			+ "|/api/v1/category/product/" + SEG
+			+ "|/api/v1/category/" + SEG + "/manufacturer"
+			// v1 store by code and store languages; not /store/unique or /store/{code}/signup/{token}
+			+ "|/api/v1/store/(?!unique$)" + SEG
+			+ "|/api/v1/config/?"
+			+ "|/api/v1/content/(?:summary|images)"
+			+ "|/api/v1/content/pages/" + SEG
+			+ "|/api/v1/content/pages/name/" + SEG
+			+ "|/api/v1/content/boxes/" + SEG
+			// v2 products and variations
+			+ "|/api/v2/products/?"
+			+ "|/api/v2/products/category/" + SEG
+			+ "|/api/v2/product/(?:name|friendly)/" + SEG
+			+ "|/api/v2/product/" + SEG
+			+ "|/api/v2/category/" + SEG + "/variations"
+			+ ")$");
+
+	/** never shared, even if a route above would match */
 	private static final Pattern PERSONAL = Pattern
 			.compile("/(private|auth|cart|carts|checkout|customer|customers|order|orders)(/|$)");
 
