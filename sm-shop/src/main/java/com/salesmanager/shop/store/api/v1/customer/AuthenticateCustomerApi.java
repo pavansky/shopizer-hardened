@@ -35,7 +35,6 @@ import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.core.model.reference.language.Language;
 import com.salesmanager.shop.constants.Constants;
 import com.salesmanager.shop.model.customer.PersistableCustomer;
-import com.salesmanager.shop.store.api.exception.GenericRuntimeException;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.api.exception.UnauthorizedException;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
@@ -93,7 +92,13 @@ public class AuthenticateCustomerApi {
     private UserFacade userFacade;
 
     /**
-     * Create new customer for a given MerchantStore, then authenticate that customer
+     * Create new customer for a given MerchantStore, then authenticate that customer.
+     *
+     * The response does not say whether the email is already registered in this
+     * store: the status (200) and body shape ({id, token}) are the same either way
+     * and no message names the account. When the email exists, nothing is created
+     * or changed. If the password also matches, the caller gets a token as on login;
+     * otherwise id and token are null.
      */
     @RequestMapping( value={"/customer/register"}, method=RequestMethod.POST, produces ={ "application/json" })
     @ResponseStatus(HttpStatus.CREATED)
@@ -108,18 +113,20 @@ public class AuthenticateCustomerApi {
 
 
             customer.setUserName(customer.getEmailAddress());
-            
-			if(customerFacade.checkIfUserExists(customer.getUserName(),  merchantStore)) {
-				//409 Conflict
-				throw new GenericRuntimeException("409", "Customer with email [" + customer.getEmailAddress() + "] is already registered");
-			}
-            
+
+            // Validated before the existence check so a bad request fails the same
+            // way for a new and an existing email.
             Validate.notNull(customer.getUserName(),"Username cannot be null");
             Validate.notNull(customer.getBilling(),"Requires customer Country code");
             Validate.notNull(customer.getBilling().getCountry(),"Requires customer Country code");
-            
-            customerFacade.registerCustomer(customer, merchantStore, language);
-            
+
+            if(customerFacade.checkIfUserExists(customer.getUserName(),  merchantStore)) {
+                // Same conversion and validation as a new registration, nothing saved.
+                customerFacade.getCustomerModel(customer, merchantStore, language);
+            } else {
+                customerFacade.registerCustomer(customer, merchantStore, language);
+            }
+
             // Perform the security
             Authentication authentication = null;
             try {
@@ -132,11 +139,11 @@ public class AuthenticateCustomerApi {
                 );
                 
             } catch(Exception e) {
-                return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+                authentication = null;
             }
-            
+
             if(authentication == null) {
-                return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+                return ResponseEntity.ok(new AuthenticationResponse(null, null));
             }
 
             SecurityContextHolder.getContext().setAuthentication(authentication);
@@ -146,7 +153,7 @@ public class AuthenticateCustomerApi {
             final String token = jwtTokenUtil.generateCustomerToken(userDetails, merchantStore.getCode());
 
             // Return the token
-            return ResponseEntity.ok(new AuthenticationResponse(customer.getId(),token));
+            return ResponseEntity.ok(new AuthenticationResponse(userDetails.getId(),token));
 
         
     }
