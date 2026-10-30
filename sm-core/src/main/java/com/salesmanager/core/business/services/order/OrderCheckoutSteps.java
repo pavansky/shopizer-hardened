@@ -62,6 +62,13 @@ public interface OrderCheckoutSteps {
 	boolean reconcilePaidOrder(Long orderId, String comment) throws ServiceException;
 
 	/**
+	 * Same as {@link #reconcilePaidOrder(Long, String)}. With fromReview the
+	 * order may also be claimed from PAYMENT_REVIEW; only an explicit re-check
+	 * requested by a person passes true.
+	 */
+	boolean reconcilePaidOrder(Long orderId, String comment, boolean fromReview) throws ServiceException;
+
+	/**
 	 * Reconciliation of an order left in PAYMENT_PENDING without any recorded
 	 * payment. Claims the order with a compare-and-set PAYMENT_PENDING ->
 	 * PAYMENT_FAILED and returns the inventory reserved for its lines.
@@ -77,6 +84,13 @@ public interface OrderCheckoutSteps {
 	boolean reconcileUnpaidOrder(Long orderId, String reason, Long attemptId);
 
 	/**
+	 * Same as {@link #reconcileUnpaidOrder(Long, String, Long)} (attemptId may
+	 * be null). With fromReview the order may also be claimed from
+	 * PAYMENT_REVIEW.
+	 */
+	boolean reconcileUnpaidOrder(Long orderId, String reason, Long attemptId, boolean fromReview);
+
+	/**
 	 * The gateway confirmed a payment the shop never recorded. Claims the order
 	 * (PAYMENT_PENDING -> ORDERED or PROCESSED), stores the payment transaction,
 	 * marks the attempt SUCCEEDED and writes the history entry.
@@ -85,6 +99,13 @@ public interface OrderCheckoutSteps {
 	 */
 	boolean reconcileConfirmedPayment(Long orderId, Long attemptId, Transaction paymentTransaction, String comment)
 			throws ServiceException;
+
+	/**
+	 * Same as {@link #reconcileConfirmedPayment(Long, Long, Transaction, String)}.
+	 * With fromReview the order may also be claimed from PAYMENT_REVIEW.
+	 */
+	boolean reconcileConfirmedPayment(Long orderId, Long attemptId, Transaction paymentTransaction, String comment,
+			boolean fromReview) throws ServiceException;
 
 	/**
 	 * Moves an order whose payment outcome is still unknown from
@@ -100,4 +121,26 @@ public interface OrderCheckoutSteps {
 	 */
 	void recordCompensation(Long orderId, Long attemptId, Transaction refundTransaction, String comment)
 			throws ServiceException;
+
+	/**
+	 * Returns the stock of every line of the order to inventory, with the same
+	 * update the checkout uses when a payment fails. Lines whose SKU no longer
+	 * resolves to a product of the order's store are skipped.
+	 */
+	void restock(Long orderId);
+
+	/**
+	 * Final step of a cancellation. Claims the order with a compare-and-set
+	 * from -> CANCELED, stores the transaction that gave money back (a refund
+	 * or a voided authorisation, may be null), returns the stock when asked,
+	 * closes the given payment attempt (may be null) and writes the history
+	 * entry, all in one transaction.
+	 *
+	 * from is the status read before the cancellation started, or REFUNDED when
+	 * the cancellation itself refunded the captured amount just before.
+	 *
+	 * @return false when the order is no longer in status from
+	 */
+	boolean markCanceled(Long orderId, OrderStatus from, boolean restock, Transaction moneyReturned,
+			Long attemptToClose, String comment) throws ServiceException;
 }
