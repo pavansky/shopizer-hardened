@@ -66,6 +66,14 @@ public class DataConfiguration {
     private int maxPoolSize;
 
     /**
+     * How long a request waits for a pooled connection before it fails. Hikari's default
+     * is 30 s, which lets requests pile up behind a saturated pool; failing after 2 s lets
+     * the API answer 503 with Retry-After (RestErrorHandler) while the pool recovers.
+     */
+    @Value("${db.connectionTimeout:2000}")
+    private long connectionTimeout;
+
+    /**
      * Lazy associations are loaded for up to this many owners in one select. The product
      * loaders rely on it to replace their collection fetch joins.
      */
@@ -89,8 +97,10 @@ public class DataConfiguration {
     	.build();
     	
     	/** Datasource config **/
-    	dataSource.setIdleTimeout(minPoolSize);
+    	// Fixed-size pool, as Hikari recommends: minimumIdle defaults to the maximum. The old
+    	// setIdleTimeout(minPoolSize) passed a pool size as milliseconds and had no effect.
     	dataSource.setMaximumPoolSize(maxPoolSize);
+    	dataSource.setConnectionTimeout(connectionTimeout);
     	dataSource.setConnectionTestQuery(testQuery);
     	
     	return dataSource;
