@@ -1,6 +1,8 @@
 // Mixed storefront load: browse (most traffic), add to cart, and checkout.
 // Run against the compose stack:
 //   docker run --rm -i --network host -e BASE=http://localhost:8080 grafana/k6:1.3.0 run - < deploy/loadtest/k6-shop.js
+// For a realistic catalog, seed it first: scripts/seed-catalog.sh http://localhost:8080
+// (1,000 products; the list page then pages over all of them, not over one product).
 import http from 'k6/http';
 import { check, group } from 'k6';
 
@@ -14,6 +16,9 @@ export const options = {
     checkout: { executor: 'constant-vus', vus: 4,  duration: '60s', exec: 'checkout', startTime: '5s' },
   },
   thresholds: {
+    // listing and category pages: one line each so the summary shows their own p95
+    'http_req_duration{name:products}': ['p(95)<1000'],
+    'http_req_duration{name:category}': ['p(95)<500'],
     'http_req_duration{name:product}': ['p(95)<500'],
     'http_req_duration{name:checkout}': ['p(95)<1500'],
     'http_req_failed{name:product}': ['rate<0.01'],
