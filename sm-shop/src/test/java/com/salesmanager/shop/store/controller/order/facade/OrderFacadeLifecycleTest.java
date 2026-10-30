@@ -54,6 +54,7 @@ class OrderFacadeLifecycleTest {
 	private OrderCheckoutSteps steps;
 	private PendingOrderReconciler reconciler;
 	private EmailTemplatesUtils emails;
+	private CustomerService customerService;
 	private final MerchantStore store = new MerchantStore();
 	private final Language language = new Language();
 	private final Order order = new Order();
@@ -67,6 +68,7 @@ class OrderFacadeLifecycleTest {
 		order.setId(9L);
 		order.setCustomerId(3L);
 		order.setStatus(OrderStatus.ORDERED);
+		order.setCustomerEmailAddress("buyer@example.com");
 		facade = new OrderFacadeImpl();
 		orderService = mock(OrderService.class);
 		transactionService = mock(TransactionService.class);
@@ -82,7 +84,8 @@ class OrderFacadeLifecycleTest {
 		inject("orderService", orderService);
 		inject("transactionService", transactionService);
 		inject("paymentService", paymentService);
-		inject("customerService", mock(CustomerService.class));
+		customerService = mock(CustomerService.class);
+		inject("customerService", customerService);
 		inject("orderCommandService", commands);
 		inject("orderCheckoutSteps", steps);
 		inject("pendingOrderReconciler", reconciler);
@@ -148,10 +151,19 @@ class OrderFacadeLifecycleTest {
 		assertEquals("shipped", history.getValue().getComments());
 	}
 
+	/** processRefund sets REFUNDED on the order it was given when, under its lock, the refund emptied the order. */
+	private void refundEmptiesTheOrder() throws Exception {
+		when(paymentService.processRefund(eq(order), any(), eq(store), any())).thenAnswer(inv -> {
+			order.setStatus(OrderStatus.REFUNDED);
+			return new Transaction();
+		});
+	}
+
 	@Test
 	void fullRefundReturnsStockAndEmails() throws Exception {
 		when(transactionService.getRefundableTransaction(order)).thenReturn(new Transaction());
 		when(transactionService.getRefundableAmount(order)).thenReturn(new BigDecimal("40.00"));
+		refundEmptiesTheOrder();
 		try {
 			facade.refundOrder(store, 9L, null, language);
 		} catch (RuntimeException ignore) {
@@ -174,6 +186,73 @@ class OrderFacadeLifecycleTest {
 		verify(paymentService).processRefund(order, null, store, new BigDecimal("10.00"));
 		verify(steps, never()).restock(any());
 		verifyStatusEmail();
+	}
+
+	@Test
+	void partialRefundThatEmptiedTheOrderReturnsStock() throws Exception {
+		// 249 left when read, but a concurrent refund of 100 committed first: under the
+		// lock this 149 is the refund that empties the order
+		when(transactionService.getRefundableTransaction(order)).thenReturn(new Transaction());
+		when(transactionService.getRefundableAmount(order)).thenReturn(new BigDecimal("249.00"));
+		refundEmptiesTheOrder();
+		try {
+			facade.refundOrder(store, 9L, new BigDecimal("149.00"), language);
+		} catch (RuntimeException ignore) {
+			// populating the readable transaction needs Spring wiring
+		}
+		verify(steps).restock(9L);
+	}
+
+	@Test
+	void fullAmountThatEndedPartialKeepsStock() throws Exception {
+		// asked for everything that was left when read; processRefund saw it as partial
+		// (it does not set REFUNDED), so another refund will be the one that restocks
+		when(transactionService.getRefundableTransaction(order)).thenReturn(new Transaction());
+		when(transactionService.getRefundableAmount(order)).thenReturn(new BigDecimal("40.00"));
+		try {
+			facade.refundOrder(store, 9L, null, language);
+		} catch (RuntimeException ignore) {
+			// populating the readable transaction needs Spring wiring
+		}
+		verify(steps, never()).restock(any());
+	}
+
+	@Test
+	void statusUpdateCannotSettleAnUnpaidOrder() throws Exception {
+		for (OrderStatus waiting : Arrays.asList(OrderStatus.PAYMENT_PENDING, OrderStatus.PAYMENT_REVIEW)) {
+			order.setStatus(waiting);
+			for (OrderStatus target : Arrays.asList(OrderStatus.ORDERED, OrderStatus.PROCESSED)) {
+				ConflictException refused = assertThrows(ConflictException.class,
+						() -> facade.updateOrderStatus(order, target, store));
+				assertTrue(refused.getErrorMessage().contains("/payment/recheck"), refused.getErrorMessage());
+				assertEquals(waiting, order.getStatus());
+			}
+		}
+		verify(orderService, never()).addOrderStatusHistory(any(), any());
+		verify(emails, never()).sendUpdateOrderStatusEmail(any(), any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void reviewOrderOffersRecheckAndCancelButNoStatusUpdate() {
+		order.setStatus(OrderStatus.PAYMENT_REVIEW);
+
+		ReadableOrderLifecycle l = facade.getOrderLifecycle(9L, store);
+
+		assertTrue(l.getStatusUpdates().isEmpty());
+		assertTrue(l.isPaymentRecheck());
+		assertTrue(l.isCancelable());
+	}
+
+	@Test
+	void customerNotNotifiedWithoutAnEmailAddress() throws Exception {
+		order.setCustomerEmailAddress(null);
+		when(customerService.getById(3L)).thenReturn(new com.salesmanager.core.model.customer.Customer());
+
+		facade.updateOrderStatus(order, OrderStatus.PROCESSED, store);
+
+		ArgumentCaptor<OrderStatusHistory> history = ArgumentCaptor.forClass(OrderStatusHistory.class);
+		verify(orderService).addOrderStatusHistory(eq(order), history.capture());
+		assertEquals(Integer.valueOf(0), history.getValue().getCustomerNotified());
 	}
 
 	@Test
@@ -244,5 +323,22 @@ class OrderFacadeLifecycleTest {
 		when(reconciler.recheckOrder(9L)).thenReturn(result);
 
 		assertThrows(GenericRuntimeException.class, () -> facade.recheckPayment(9L, store));
+	}
+
+	@Test
+	void recheckThatMovedTheOrderToReviewIsNotAnError() {
+		order.setStatus(OrderStatus.PAYMENT_PENDING);
+		PendingOrderReconciler.Result result = new PendingOrderReconciler.Result();
+		result.lookupErrors = 1;
+		result.review = 1;
+		when(reconciler.recheckOrder(9L)).thenAnswer(inv -> {
+			order.setStatus(OrderStatus.PAYMENT_REVIEW);
+			return result;
+		});
+
+		ReadableOrderLifecycle l = facade.recheckPayment(9L, store);
+
+		assertEquals("PAYMENT_REVIEW", l.getStatus());
+		assertTrue(l.getMessage().contains("PAYMENT_REVIEW"), l.getMessage());
 	}
 }
