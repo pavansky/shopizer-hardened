@@ -683,6 +683,11 @@ public class ProductRepositoryImpl implements ProductRepositoryCustom {
 		StringBuilder where = new StringBuilder(" where p.merchantStore.id=:mId");
 		params.put("mId", store.getId());
 
+		// a product without any availability row has no price, and the list mappers fail on
+		// it ("No applicable inventory"); the previous page query left it out with an inner
+		// join on availabilities, so the count and the page both keep that rule
+		where.append(" and exists (select pa.id from ProductAvailability pa where pa.product=p)");
+
 		if (!CollectionUtils.isEmpty(criteria.getProductIds())) {
 			where.append(" and p.id in (:pId)");
 			params.put("pId", criteria.getProductIds());

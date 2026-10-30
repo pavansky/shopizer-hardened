@@ -110,12 +110,13 @@ public class ProductListingQueryTest extends AbstractSalesManagerCoreTestCase {
 		Product off = CatalogTestData.product(store, type, "AV-OFF", 2, en, "av-off");
 		off.setAvailable(false);
 		productService.saveProduct(off);
+		// available from tomorrow, so it matches the "p.dateAvailable>:dt" branch
 		Product otherOff = CatalogTestData.product(other, type, "AV-OTHER", 1, en, "av-other");
-		otherOff.setAvailable(false);
+		otherOff.setDateAvailable(new java.sql.Date(System.currentTimeMillis() + 24L * 3600 * 1000));
 		productService.saveProduct(otherOff);
 
 		// the count used to read "... and p.available=false or p.dateAvailable>:dt", so the
-		// OR escaped the store filter and counted the other store's unavailable product
+		// OR escaped the store filter and counted the other store's future product (2, not 1)
 		ProductCriteria unavailable = adminCriteria();
 		unavailable.setAvailable(false);
 		ProductList list = productService.listByStore(store, en, unavailable);
@@ -127,12 +128,50 @@ public class ProductListingQueryTest extends AbstractSalesManagerCoreTestCase {
 		Assert.assertEquals(1, productService.listByStore(store, en, available).getTotalCount());
 	}
 
-	@Test(expected = Exception.class)
+	@Test
+	public void productWithoutAvailabilityIsNeitherCountedNorListed() throws Exception {
+		Language en = languageService.getByCode("en");
+		MerchantStore store = CatalogTestData.store("NOINVSTORE", en, merchantService, countryService,
+				currencyService, zoneService);
+		ProductType type = productTypeService.getProductType(ProductType.GENERAL_TYPE);
+
+		Product stocked = productService.saveProduct(CatalogTestData.product(store, type, "INV-YES", 1, en, "inv-yes"));
+		// a product must be created with an availability; the admin API can then delete it
+		// (DELETE /api/v1/private/product/{id}/inventory/{inventoryId})
+		Product bare = productService.saveProduct(CatalogTestData.product(store, type, "INV-NO", 2, en, "inv-no"));
+		productAvailabilityService
+				.delete(productService.findOne(bare.getId(), store).getAvailabilities().iterator().next());
+		Assert.assertTrue(productService.findOne(bare.getId(), store).getAvailabilities().isEmpty());
+
+		// the list mappers price every product, and a product with no availability row has
+		// no price ("No applicable inventory"), so one such product broke the whole page
+		Page<Product> page = productService.listByStore(store, en, shopCriteria(), 0, 10);
+		Assert.assertEquals(1, page.getTotalElements());
+		Assert.assertEquals(Collections.singletonList(stocked.getId()), ids(page.getContent()));
+
+		ProductList admin = productService.listByStore(store, en, adminCriteria());
+		Assert.assertEquals(1, admin.getTotalCount());
+		Assert.assertEquals(Collections.singletonList(stocked.getId()), ids(admin.getProducts()));
+	}
+
+	@Test
 	public void testConfigurationRejectsPagingOverACollectionFetch() {
 		javax.persistence.EntityManager em = entityManagerFactory.createEntityManager();
 		try {
 			em.createQuery("select distinct p from Product p left join fetch p.descriptions")
 					.setFirstResult(0).setMaxResults(5).getResultList();
+			Assert.fail("paging over a collection fetch was accepted");
+		} catch (RuntimeException e) {
+			Throwable cause = e;
+			boolean rejectedByConfiguration = false;
+			while (cause != null) {
+				if (cause instanceof org.hibernate.HibernateException && cause.getMessage() != null
+						&& cause.getMessage().contains("firstResult/maxResults specified with collection fetch")) {
+					rejectedByConfiguration = true;
+				}
+				cause = cause.getCause();
+			}
+			Assert.assertTrue("unexpected failure: " + e, rejectedByConfiguration);
 		} finally {
 			em.close();
 		}
