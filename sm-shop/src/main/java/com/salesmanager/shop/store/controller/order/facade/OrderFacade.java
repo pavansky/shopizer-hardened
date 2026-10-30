@@ -188,6 +188,40 @@ public interface OrderFacade {
 	ReadableTransaction refundOrder(MerchantStore store, Long orderId, BigDecimal amount, Language language);
 
 	/**
+	 * Legal next statuses and available commands for an order of the given store.
+	 * @throws com.salesmanager.shop.store.api.exception.ResourceNotFoundException order not in store
+	 */
+	com.salesmanager.shop.model.order.ReadableOrderLifecycle getOrderLifecycle(Long orderId, MerchantStore store);
+
+	/**
+	 * Cancels an order of the given store: refunds the captured remainder or voids
+	 * an authorisation, returns the stock, moves the order to CANCELED and emails
+	 * the customer.
+	 * @throws com.salesmanager.shop.store.api.exception.ResourceNotFoundException order not in store
+	 * @throws com.salesmanager.shop.store.api.exception.ConflictException already canceled, or not cancelable
+	 */
+	com.salesmanager.shop.model.order.ReadableOrderLifecycle cancelOrder(Long orderId, String comment,
+			MerchantStore store);
+
+	/**
+	 * Asks the gateway again about a PAYMENT_PENDING or PAYMENT_REVIEW order of the
+	 * given store and settles it when the answer is clear.
+	 * @throws com.salesmanager.shop.store.api.exception.ResourceNotFoundException order not in store
+	 * @throws com.salesmanager.shop.store.api.exception.ConflictException order not waiting for a payment
+	 */
+	com.salesmanager.shop.model.order.ReadableOrderLifecycle recheckPayment(Long orderId, MerchantStore store);
+
+	/**
+	 * A person confirms the payment of a PAYMENT_REVIEW order of the given store
+	 * that the gateway cannot report (see OrderCommandService.confirmPayment).
+	 * @throws com.salesmanager.shop.store.api.exception.ResourceNotFoundException order not in store
+	 * @throws com.salesmanager.shop.store.api.exception.ConflictException order not in PAYMENT_REVIEW
+	 * @throws com.salesmanager.shop.store.api.exception.RestApiException 400 when the reason is blank
+	 */
+	com.salesmanager.shop.model.order.ReadableOrderLifecycle confirmPayment(Long orderId, String confirmedBy,
+			String reference, String reason, MerchantStore store);
+
+	/**
 	 * Returns next TransactionType expected if any.
 	 */
 	TransactionType nextTransaction(Long orderId, MerchantStore store);

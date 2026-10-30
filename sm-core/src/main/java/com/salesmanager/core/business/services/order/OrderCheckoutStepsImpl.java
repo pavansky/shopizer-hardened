@@ -151,13 +151,19 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 	@Override
 	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
 	public boolean reconcilePaidOrder(Long orderId, String comment) throws ServiceException {
+		return reconcilePaidOrder(orderId, comment, false);
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+	public boolean reconcilePaidOrder(Long orderId, String comment, boolean fromReview) throws ServiceException {
 		Order order = em.find(Order.class, orderId);
 		if (order == null) {
 			throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Order " + orderId + " not found");
 		}
 		OrderStatus target = order.getPaymentType() == PaymentType.MONEYORDER ? OrderStatus.ORDERED
 				: OrderStatus.PROCESSED;
-		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, target)) {
+		if (!claim(orderId, target, fromReview)) {
 			return false;
 		}
 		em.refresh(order);
@@ -168,10 +174,18 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 	@Override
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public boolean reconcileUnpaidOrder(Long orderId, String reason, Long attemptId) {
-		if (!reconcileUnpaid(orderId, reason)) {
+		return reconcileUnpaidOrder(orderId, reason, attemptId, false);
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public boolean reconcileUnpaidOrder(Long orderId, String reason, Long attemptId, boolean fromReview) {
+		if (!reconcileUnpaid(orderId, reason, fromReview)) {
 			return false;
 		}
-		PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.FAILED, null, reason);
+		if (attemptId != null) {
+			PaymentAttempts.apply(em, attemptId, PaymentAttemptStatus.FAILED, null, reason);
+		}
 		return true;
 	}
 
@@ -179,13 +193,20 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
 	public boolean reconcileConfirmedPayment(Long orderId, Long attemptId, Transaction paymentTransaction,
 			String comment) throws ServiceException {
+		return reconcileConfirmedPayment(orderId, attemptId, paymentTransaction, comment, false);
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+	public boolean reconcileConfirmedPayment(Long orderId, Long attemptId, Transaction paymentTransaction,
+			String comment, boolean fromReview) throws ServiceException {
 		Order order = em.find(Order.class, orderId);
 		if (order == null) {
 			throw new ServiceException(ServiceException.EXCEPTION_ERROR, "Order " + orderId + " not found");
 		}
 		OrderStatus target = order.getPaymentType() == PaymentType.MONEYORDER ? OrderStatus.ORDERED
 				: OrderStatus.PROCESSED;
-		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, target)) {
+		if (!claim(orderId, target, fromReview)) {
 			return false;
 		}
 		em.refresh(order);
@@ -230,13 +251,83 @@ public class OrderCheckoutStepsImpl implements OrderCheckoutSteps {
 	@Override
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public boolean reconcileUnpaidOrder(Long orderId, String reason) {
-		return reconcileUnpaid(orderId, reason);
+		return reconcileUnpaid(orderId, reason, false);
 	}
 
-	private boolean reconcileUnpaid(Long orderId, String reason) {
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public void restock(Long orderId) {
+		Order order = em.find(Order.class, orderId);
+		if (order == null) {
+			LOGGER.error("Cannot return the stock of order {}: not found", orderId);
+			return;
+		}
+		for (ShoppingCartItem item : itemsOf(order)) {
+			release(item);
+		}
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+	public boolean markCanceled(Long orderId, OrderStatus from, boolean restock, Transaction moneyReturned,
+			Long attemptToClose, String comment) throws ServiceException {
+		// REFUNDED is accepted only as the state the cancellation's own refund just
+		// produced; the transition table keeps REFUNDED final for every other caller.
+		if (from != OrderStatus.REFUNDED) {
+			OrderStatusTransitions.check(from, OrderStatus.CANCELED);
+		}
+		int updated = em.createQuery("update Order o set o.status = :to where o.id = :id and o.status = :from")
+				.setParameter("to", OrderStatus.CANCELED)
+				.setParameter("id", orderId)
+				.setParameter("from", from)
+				.executeUpdate();
+		if (updated != 1) {
+			return false;
+		}
+		Order order = em.find(Order.class, orderId);
+		em.refresh(order);
+		order.getOrderHistory().add(history(order, OrderStatus.CANCELED, StringUtils.abbreviate(comment, 250)));
+		if (moneyReturned != null && moneyReturned.getPaymentType() == null) {
+			moneyReturned.setPaymentType(order.getPaymentType());
+		}
+		storePayment(order, moneyReturned);
+		if (restock) {
+			for (ShoppingCartItem item : itemsOf(order)) {
+				release(item);
+			}
+		}
+		if (attemptToClose != null) {
+			PaymentAttempts.apply(em, attemptToClose, PaymentAttemptStatus.FAILED, null,
+					StringUtils.abbreviate(comment, 250));
+		}
+		return true;
+	}
+
+	@Override
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public boolean markStatus(Long orderId, OrderStatus from, OrderStatus to, String comment,
+			boolean customerNotified) {
+		if (!compareAndSet(orderId, from, to)) {
+			return false;
+		}
+		Order order = em.find(Order.class, orderId);
+		em.refresh(order);
+		OrderStatusHistory h = history(order, to, StringUtils.abbreviate(comment, 250));
+		h.setCustomerNotified(customerNotified ? 1 : 0);
+		order.getOrderHistory().add(h);
+		return true;
+	}
+
+	/** PAYMENT_PENDING -> to; also PAYMENT_REVIEW -> to when fromReview. */
+	private boolean claim(Long orderId, OrderStatus to, boolean fromReview) {
+		return compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, to)
+				|| (fromReview && compareAndSet(orderId, OrderStatus.PAYMENT_REVIEW, to));
+	}
+
+	private boolean reconcileUnpaid(Long orderId, String reason, boolean fromReview) {
 		// The conditional update is the claim: only the instance whose update
 		// matched the PAYMENT_PENDING row goes on to return the stock.
-		if (!compareAndSet(orderId, OrderStatus.PAYMENT_PENDING, OrderStatus.PAYMENT_FAILED)) {
+		if (!claim(orderId, OrderStatus.PAYMENT_FAILED, fromReview)) {
 			return false;
 		}
 		Order order = em.find(Order.class, orderId);

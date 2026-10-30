@@ -262,7 +262,8 @@ public class EmailTemplatesUtils {
 		           }
 		           
 			       String status = messages.getMessage("label.order." + order.getStatus().name(), customerLocale, order.getStatus().name());
-			       String[] statusMessage = {DateUtil.formatDate(order.getDatePurchased()),status};
+			       // email.order.status is "Last order status: {0}"
+			       String[] statusMessage = {status};
 		           templateTokens.put(EmailConstants.ORDER_STATUS, messages.getMessage("email.order.status", statusMessage, customerLocale));
 		           
 
@@ -275,7 +276,7 @@ public class EmailTemplatesUtils {
 		           email.setTemplateName(EmailConstants.EMAIL_ORDER_TPL);
 		           email.setTemplateTokens(templateTokens);
 
-		           LOGGER.debug( "Sending email to {} for order id {} ",customer.getEmailAddress(), order.getId() );
+		           LOGGER.debug( "Sending email to {} for order id {} ",toEmail, order.getId() );
 		           emailService.sendHtmlEmail(merchantStore, email);
 
 		       } catch (Exception e) {
@@ -392,8 +393,9 @@ public class EmailTemplatesUtils {
 		if (reloadedOrder != null) {
 			order = reloadedOrder;
 		}
-		if (customer != null && customer.getId() != null) {
-			Customer reloaded = customerService.getById(customer.getId());
+		Long customerId = customer != null && customer.getId() != null ? customer.getId() : order.getCustomerId();
+		if (customerId != null) {
+			Customer reloaded = customerService.getById(customerId);
 			if (reloaded != null) {
 				customer = reloaded;
 			}
@@ -401,17 +403,27 @@ public class EmailTemplatesUtils {
 		   /** issue with putting that elsewhere **/ 
 	       LOGGER.info( "Sending order status email to customer" );
 	       try {
-
+				// The order keeps the address and email used for this purchase, so it is
+				// preferred over the customer record (which may be anonymous or changed since).
+				String to = StringUtils.isNotBlank(order.getCustomerEmailAddress()) ? order.getCustomerEmailAddress()
+						: customer == null ? null : customer.getEmailAddress();
+				if (StringUtils.isBlank(to)) {
+					LOGGER.warn("Order status email for order {} skipped: no email address", order.getId());
+					return;
+				}
+				com.salesmanager.core.model.common.Billing names = order.getBilling() != null ? order.getBilling()
+						: customer == null ? null : customer.getBilling();
 
 				Map<String, String> templateTokens = emailUtils.createEmailObjectsMap(contextPath, merchantStore, messages, customerLocale);
 				
 		        templateTokens.put(EmailConstants.LABEL_HI, messages.getMessage("label.generic.hi", customerLocale));
-		        templateTokens.put(EmailConstants.EMAIL_CUSTOMER_FIRSTNAME, customer.getBilling().getFirstName());
-		        templateTokens.put(EmailConstants.EMAIL_CUSTOMER_LASTNAME, customer.getBilling().getLastName());
+		        templateTokens.put(EmailConstants.EMAIL_CUSTOMER_FIRSTNAME, names == null ? "" : StringUtils.defaultString(names.getFirstName()));
+		        templateTokens.put(EmailConstants.EMAIL_CUSTOMER_LASTNAME, names == null ? "" : StringUtils.defaultString(names.getLastName()));
 				
 		        String[] statusMessageText = {String.valueOf(order.getId()),DateUtil.formatDate(order.getDatePurchased())};
 		        String status = messages.getMessage("label.order." + order.getStatus().name(), customerLocale, order.getStatus().name());
-		        String[] statusMessage = {DateUtil.formatDate(lastHistory.getDateAdded()),status};
+		        // email.order.status is "Last order status: {0}"
+		        String[] statusMessage = {status};
 		        
 		        String comments = lastHistory.getComments();
 		        if(StringUtils.isBlank(comments)) {
@@ -427,7 +439,7 @@ public class EmailTemplatesUtils {
 				email.setFrom(merchantStore.getStorename());
 				email.setFromEmail(merchantStore.getStoreEmailAddress());
 				email.setSubject(messages.getMessage("email.order.status.title",new String[]{String.valueOf(order.getId())},customerLocale));
-				email.setTo(customer.getEmailAddress());
+				email.setTo(to);
 				email.setTemplateName(EmailConstants.ORDER_STATUS_TMPL);
 				email.setTemplateTokens(templateTokens);
 	
@@ -436,7 +448,7 @@ public class EmailTemplatesUtils {
 				emailService.sendHtmlEmail(merchantStore, email);
 
 	       } catch (Exception e) {
-	           LOGGER.error("Error occured while sending order download email ",e);
+	           LOGGER.error("Error occured while sending order status email ",e);
 	       }
 		
 	}
