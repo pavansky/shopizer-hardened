@@ -1,5 +1,6 @@
 package com.salesmanager.shop.store.api.v1.payment;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
@@ -29,6 +30,7 @@ import com.salesmanager.core.model.merchant.MerchantStore;
 import com.salesmanager.shop.constants.Constants;
 import com.salesmanager.shop.model.system.IntegrationModuleConfiguration;
 import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
+import com.salesmanager.shop.store.api.exception.ServiceRuntimeException;
 import com.salesmanager.shop.store.api.exception.UnauthorizedException;
 import com.salesmanager.shop.store.facade.payment.PaymentConfigurationChangeNotifier;
 import com.salesmanager.shop.store.facade.payment.PaymentModuleConfigurationFacade;
@@ -104,6 +106,19 @@ class PaymentApiTest {
 				.authorizeUser(eq("deleted@shopizer.com"), anyList(), any());
 
 		assertThrows(UnauthorizedException.class, () -> api.paymentModule("stripe", store, null));
+
+		verifyNoInteractions(facade, notifier, paymentService);
+	}
+
+	@Test
+	void backendFailureDuringAuthorizationIsNotReportedAsForbidden() throws Exception {
+		when(authorizationUtils.authenticatedUser()).thenReturn("admin@shopizer.com");
+		doThrow(new ServiceRuntimeException("Error while getting user [admin@shopizer.com]")).when(authorizationUtils)
+				.authorizeUser(eq("admin@shopizer.com"), anyList(), any());
+
+		ServiceRuntimeException thrown = assertThrows(ServiceRuntimeException.class,
+				() -> api.paymentModule("stripe", store, null));
+		assertFalse(thrown instanceof ResourceNotFoundException);
 
 		verifyNoInteractions(facade, notifier, paymentService);
 	}

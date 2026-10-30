@@ -30,6 +30,7 @@ import com.salesmanager.shop.model.system.IntegrationModuleConfiguration;
 import com.salesmanager.shop.model.system.IntegrationModuleSummaryEntity;
 import com.salesmanager.shop.constants.Constants;
 import com.salesmanager.shop.store.api.exception.ErrorEntity;
+import com.salesmanager.shop.store.api.exception.ResourceNotFoundException;
 import com.salesmanager.shop.store.api.exception.ServiceRuntimeException;
 import com.salesmanager.shop.store.api.exception.UnauthorizedException;
 import com.salesmanager.shop.store.facade.payment.PaymentConfigurationChangeNotifier;
@@ -155,14 +156,16 @@ public class PaymentApi {
 	/**
 	 * Payment configuration holds gateway credentials, so only store administrators
 	 * may read or change it, and only for their own store (SUPERADMIN for any store).
-	 * A lookup failure during the check (for example a user deleted while the token is
-	 * still valid) is a denial too, so it is reported as 403 and not as a server error.
+	 * A user that no longer exists (deleted while the token is still valid) is a denial
+	 * too, so it is reported as 403. Any other failure during the check, such as the
+	 * database being unavailable, is left to propagate as a server error so outages are
+	 * not hidden behind a 403.
 	 */
 	private String authorizeStoreAdmin(MerchantStore merchantStore) {
 		String user = authorizationUtils.authenticatedUser();
 		try {
 			authorizationUtils.authorizeUser(user, ADMIN_GROUPS, merchantStore);
-		} catch (ServiceRuntimeException e) {
+		} catch (ResourceNotFoundException e) {
 			LOGGER.warn("Payment configuration authorization failed for [{}]: {}", user, e.getErrorMessage());
 			throw new UnauthorizedException("Cannot authorize user [" + user + "] for store ["
 					+ (merchantStore == null ? null : merchantStore.getCode()) + "]");
