@@ -42,6 +42,10 @@ import com.salesmanager.core.business.services.catalog.product.ProductService;
 import com.salesmanager.core.business.services.catalog.product.attribute.ProductAttributeService;
 import com.salesmanager.core.business.services.catalog.product.file.DigitalProductService;
 import com.salesmanager.core.business.services.order.OrderChargedNotRecordedException;
+import com.salesmanager.core.business.services.order.OrderCheckoutSteps;
+import com.salesmanager.core.business.services.order.OrderCommandRefusedException;
+import com.salesmanager.core.business.services.order.OrderCommandService;
+import com.salesmanager.core.business.services.order.reconciliation.PendingOrderReconciler;
 import com.salesmanager.core.business.services.order.OrderService;
 import com.salesmanager.core.business.services.order.IllegalOrderStatusTransitionException;
 import com.salesmanager.core.business.services.order.OrderStatusTransitions;
@@ -92,6 +96,7 @@ import com.salesmanager.shop.model.customer.ReadableCustomer;
 import com.salesmanager.shop.model.customer.address.Address;
 import com.salesmanager.shop.model.order.OrderEntity;
 import com.salesmanager.shop.model.order.PersistableOrderProduct;
+import com.salesmanager.shop.model.order.ReadableOrderLifecycle;
 import com.salesmanager.shop.model.order.ReadableOrderProduct;
 import com.salesmanager.shop.model.order.ShopOrder;
 import com.salesmanager.shop.model.order.history.PersistableOrderStatusHistory;
@@ -175,6 +180,15 @@ public class OrderFacadeImpl implements OrderFacade {
 
 	@Inject
 	private EmailTemplatesUtils emailTemplatesUtils;
+
+	@Inject
+	private OrderCommandService orderCommandService;
+
+	@Inject
+	private OrderCheckoutSteps orderCheckoutSteps;
+
+	@Inject
+	private PendingOrderReconciler pendingOrderReconciler;
 
 	@Inject
 	private LabelUtils messages;
@@ -1568,12 +1582,141 @@ public class OrderFacadeImpl implements OrderFacade {
 				throw new RestApiException("400",
 						"Refund amount must be greater than 0 and at most " + remaining + ", was " + refundAmount);
 			}
-			return toReadable(paymentService.processRefund(order, null, store, refundAmount), store, language);
+			Transaction refund = paymentService.processRefund(order, null, store, refundAmount);
+			boolean full = refundAmount.compareTo(remaining) == 0;
+			if (full) {
+				restockAfterRefund(orderId);
+			}
+			notifyStatus(order, store, (full ? "Refund of " : "Partial refund of ") + amount(refundAmount, order));
+			return toReadable(refund, store, language);
 		} catch (ServiceException e) {
 			throw paymentFailure("refund", orderId, e);
 		} catch (IllegalOrderStatusTransitionException e) {
 			throw new ConflictException(e.getMessage());
 		}
+	}
+
+	/**
+	 * The refund is already committed at the gateway and in the ledger, so a
+	 * failure to return the stock must not turn the response into an error.
+	 */
+	private void restockAfterRefund(Long orderId) {
+		try {
+			orderCheckoutSteps.restock(orderId);
+		} catch (RuntimeException e) {
+			LOGGER.error("Order " + orderId + " fully refunded but its stock was not returned", e);
+		}
+	}
+
+	private static String amount(BigDecimal value, Order order) {
+		return value.toPlainString() + (order.getCurrency() == null ? "" : " " + order.getCurrency().getCode());
+	}
+
+	/**
+	 * Sends the order status email (email_template_order_status) for a change that
+	 * is already committed. Gated like the checkout confirmation by ORDER_EMAIL_API;
+	 * the send itself is asynchronous and reloads the order.
+	 */
+	private void notifyStatus(Order order, MerchantStore store, String comment) {
+		if (!emailsEnabled()) {
+			return;
+		}
+		try {
+			OrderStatusHistory change = new OrderStatusHistory();
+			change.setDateAdded(new Date());
+			change.setComments(comment);
+			Customer customer = null;
+			if (order.getCustomerId() != null) {
+				customer = new Customer();
+				customer.setId(order.getCustomerId());
+			}
+			emailTemplatesUtils.sendUpdateOrderStatusEmail(customer, order, change, store, LocaleUtils.getLocale(store),
+					coreConfiguration.getProperty("CONTEXT_PATH"));
+		} catch (RuntimeException e) {
+			LOGGER.error("Order " + order.getId() + " status email not sent", e);
+		}
+	}
+
+	private boolean emailsEnabled() {
+		return "true".equals(coreConfiguration.getProperty("ORDER_EMAIL_API"));
+	}
+
+	@Override
+	public ReadableOrderLifecycle getOrderLifecycle(Long orderId, MerchantStore store) {
+		Validate.notNull(store, "MerchantStore must not be null");
+		return lifecycle(storeOrder(orderId, store), null);
+	}
+
+	@Override
+	public ReadableOrderLifecycle cancelOrder(Long orderId, String comment, MerchantStore store) {
+		Validate.notNull(store, "MerchantStore must not be null");
+		Order order = storeOrder(orderId, store);
+		String done;
+		try {
+			done = orderCommandService.cancel(order, store, comment);
+		} catch (OrderCommandRefusedException | IllegalOrderStatusTransitionException e) {
+			throw new ConflictException(e.getMessage());
+		} catch (ServiceException e) {
+			throw paymentFailure("cancel", orderId, e);
+		}
+		Order canceled = storeOrder(orderId, store);
+		notifyStatus(canceled, store, done);
+		return lifecycle(canceled, done);
+	}
+
+	@Override
+	public ReadableOrderLifecycle recheckPayment(Long orderId, MerchantStore store) {
+		Validate.notNull(store, "MerchantStore must not be null");
+		Order order = storeOrder(orderId, store);
+		if (order.getStatus() != OrderStatus.PAYMENT_PENDING && order.getStatus() != OrderStatus.PAYMENT_REVIEW) {
+			throw new ConflictException("Order id [" + orderId + "] is " + order.getStatus()
+					+ "; only PAYMENT_PENDING and PAYMENT_REVIEW orders can be re-checked");
+		}
+		PendingOrderReconciler.Result result = pendingOrderReconciler.recheckOrder(orderId);
+		if (result.errors > 0 || result.lookupErrors > 0) {
+			throw new GenericRuntimeException("502",
+					"Could not get an answer from the payment gateway for order [" + orderId + "]; try again later");
+		}
+		Order after = storeOrder(orderId, store);
+		String message;
+		if (result.finalised > 0) {
+			message = "Payment confirmed; order is now " + after.getStatus();
+		} else if (result.failed > 0) {
+			message = "No payment was taken; order marked " + after.getStatus() + " and its stock returned";
+		} else {
+			message = "The gateway has not confirmed the payment yet; order stays " + after.getStatus();
+		}
+		return lifecycle(after, message);
+	}
+
+	private ReadableOrderLifecycle lifecycle(Order order, String message) {
+		ReadableOrderLifecycle readable = new ReadableOrderLifecycle();
+		OrderStatus status = order.getStatus();
+		readable.setOrderId(order.getId());
+		readable.setStatus(status == null ? null : status.name());
+		readable.setNext(names(OrderStatusTransitions.allowedFrom(status)));
+		readable.setStatusUpdates(names(OrderCommandService.statusUpdatesFrom(status)));
+		readable.setCancelable(OrderStatusTransitions.allowedFrom(status).contains(OrderStatus.CANCELED));
+		readable.setPaymentRecheck(status == OrderStatus.PAYMENT_PENDING || status == OrderStatus.PAYMENT_REVIEW);
+		try {
+			readable.setRefundable(transactionService.getRefundableAmount(order));
+		} catch (ServiceException e) {
+			throw new ServiceRuntimeException("Error while reading the payments of order [" + order.getId() + "]", e);
+		}
+		readable.setCurrency(order.getCurrency() == null ? null : order.getCurrency().getCode());
+		readable.setMessage(message);
+		return readable;
+	}
+
+	/** Names in the enum's declaration order, so clients get a stable list. */
+	private static List<String> names(Set<OrderStatus> statuses) {
+		List<String> names = new ArrayList<>();
+		for (OrderStatus s : OrderStatus.values()) {
+			if (statuses.contains(s)) {
+				names.add(s.name());
+			}
+		}
+		return names;
 	}
 
 	private Order storeOrder(Long orderId, MerchantStore store) {
@@ -1647,12 +1790,21 @@ public class OrderFacadeImpl implements OrderFacade {
 					"Order with id [" + id + "] does not exist for merchant [" + store.getCode() + "]");
 		}
 
+		// The history records what happened to the order; it does not change it. A
+		// different status here would contradict Order.status, so changes go through
+		// PUT /status (fulfilment) or the cancel and refund endpoints.
+		if (status.getStatus() != null && status.getStatus() != order.getStatus()) {
+			throw new ConflictException("Order id [" + id + "] is " + order.getStatus() + "; a history note cannot set "
+					+ status.getStatus() + ". Change the status with PUT /private/orders/" + id
+					+ "/status, or use the cancel and refund endpoints");
+		}
+
 		try {
 			OrderStatusHistory history = new OrderStatusHistory();
 			history.setComments(status.getComments());
-			history.setDateAdded(DateUtil.getDate(status.getDate()));
+			history.setDateAdded(StringUtils.isBlank(status.getDate()) ? new Date() : DateUtil.getDate(status.getDate()));
 			history.setOrder(order);
-			history.setStatus(status.getStatus());
+			history.setStatus(order.getStatus());
 
 			orderService.addOrderStatusHistory(order, history);
 
@@ -1813,6 +1965,18 @@ public class OrderFacadeImpl implements OrderFacade {
 			return; // we have the same status, lets just return
 		}
 		OrderStatus oldStatus = order.getStatus();
+		if (newStatus == OrderStatus.CANCELED) {
+			throw new ConflictException("Use POST /private/orders/" + order.getId()
+					+ "/cancel to cancel an order: it returns the payment and the stock");
+		}
+		if (newStatus == OrderStatus.REFUNDED) {
+			throw new ConflictException("Use POST /private/orders/" + order.getId()
+					+ "/refund to refund an order: a full refund sets REFUNDED");
+		}
+		if (!OrderCommandService.STATUS_UPDATE_TARGETS.contains(newStatus)) {
+			throw new ConflictException(newStatus + " is set by checkout and payment reconciliation only; use POST"
+					+ " /private/orders/" + order.getId() + "/payment/recheck or /cancel");
+		}
 		// rejects anything not in the transition table (IllegalOrderStatusTransitionException -> 409)
 		OrderStatusTransitions.check(oldStatus, newStatus);
 		order.setStatus(newStatus);
@@ -1820,15 +1984,17 @@ public class OrderFacadeImpl implements OrderFacade {
 
 		history.setComments( messages.getMessage("email.order.status.changed", new String[] {String.valueOf(oldStatus),
 				newStatus.name()}, LocaleUtils.getLocale(store)));
-		history.setCustomerNotified(0);
+		history.setCustomerNotified(emailsEnabled() ? 1 : 0);
 		history.setStatus(newStatus);
 		history.setDateAdded(new Date() );
 
 		try {
 			orderService.addOrderStatusHistory(order, history);
 		} catch (ServiceException e) {
-			e.printStackTrace();
+			// the change was not saved; answering 200 here would tell the admin it was
+			throw new ServiceRuntimeException("Status of order [" + order.getId() + "] not saved", e);
 		}
+		notifyStatus(order, store, history.getComments());
 
 	}
 }

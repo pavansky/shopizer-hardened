@@ -42,6 +42,7 @@ import com.salesmanager.core.model.shoppingcart.ShoppingCart;
 import com.salesmanager.shop.constants.Constants;
 import com.salesmanager.shop.model.customer.PersistableCustomer;
 import com.salesmanager.shop.model.customer.ReadableCustomer;
+import com.salesmanager.shop.model.order.ReadableOrderLifecycle;
 import com.salesmanager.shop.model.order.v0.ReadableOrder;
 import com.salesmanager.shop.model.order.v0.ReadableOrderList;
 import com.salesmanager.shop.model.order.v1.PersistableAnonymousOrder;
@@ -125,7 +126,14 @@ public class OrderApi {
 			@RequestParam(value = "count", required = false) Integer count, @ApiIgnore MerchantStore merchantStore,
 			@ApiIgnore Language language, HttpServletResponse response) throws Exception {
 
+		authorizeOrderReader(merchantStore);
+
 		Customer customer = customerService.getById(id);
+		// a customer of another store is reported as missing, so ids of other stores are not confirmed
+		if (customer != null && (customer.getMerchantStore() == null
+				|| !merchantStore.getId().equals(customer.getMerchantStore().getId()))) {
+			customer = null;
+		}
 
 		if (customer == null) {
 			LOGGER.error("Customer is null for id " + id);
@@ -180,7 +188,7 @@ public class OrderApi {
 		Principal principal = request.getUserPrincipal();
 		String userName = principal.getName();
 
-		Customer customer = customerService.getByNick(userName);
+		Customer customer = customerService.getByNick(userName, merchantStore.getId());
 
 		if (customer == null) {
 			response.sendError(401, "Error while listing orders, customer not authorized");
@@ -305,7 +313,7 @@ public class OrderApi {
 		Principal principal = request.getUserPrincipal();
 		String userName = principal.getName();
 
-		Customer customer = customerService.getByNick(userName);
+		Customer customer = customerService.getByNick(userName, merchantStore.getId());
 
 		if (customer == null) {
 			response.sendError(401, "Error while performing checkout customer not authorized");
@@ -522,13 +530,11 @@ public class OrderApi {
 			@ApiIgnore MerchantStore merchantStore,
 			@ApiIgnore Language language) {
 
-		String user = authorizationUtils.authenticatedUser();
-		authorizationUtils.authorizeUser(user, Stream.of(Constants.GROUP_SUPERADMIN, Constants.GROUP_ADMIN,
-				Constants.GROUP_ADMIN_ORDER, Constants.GROUP_ADMIN_RETAIL).collect(Collectors.toList()), merchantStore);
+		authorizeOrderReader(merchantStore);
 
 		Order order = orderService.getOrder(id, merchantStore);
 		if (order == null) {
-			throw new GenericRuntimeException("412", "Order not found [" + id + "]");
+			throw new ResourceNotFoundException("Order id [" + id + "] not found for store [" + merchantStore.getCode() + "]");
 		}
 
 		OrderStatus statusEnum;
@@ -540,6 +546,88 @@ public class OrderApi {
 
 		orderFacade.updateOrderStatus(order, statusEnum, merchantStore);
 		return;
+	}
+
+	/**
+	 * Legal next statuses of an order: next (the transition table), statusUpdates
+	 * (what PUT /status accepts), and whether cancel or a payment re-check apply.
+	 * 404 when the order does not belong to the store.
+	 */
+	@RequestMapping(value = { "/private/orders/{id}/transitions" }, method = RequestMethod.GET)
+	@ResponseStatus(HttpStatus.OK)
+	@ResponseBody
+	@ApiImplicitParams({
+			@ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT"),
+			@ApiImplicitParam(name = "lang", dataType = "string", defaultValue = "en") })
+	public ReadableOrderLifecycle transitions(@PathVariable final Long id, @ApiIgnore MerchantStore merchantStore,
+			@ApiIgnore Language language) {
+		authorizeOrderReader(merchantStore);
+		return orderFacade.getOrderLifecycle(id, merchantStore);
+	}
+
+	/**
+	 * Cancels an order. Captured money still refundable is refunded, an
+	 * authorisation is voided, a charge the gateway took on a PAYMENT_PENDING or
+	 * PAYMENT_REVIEW order is returned, the stock goes back to inventory and the
+	 * customer gets the status email. Optional body {"comment": "..."}.
+	 * 404 when the order does not belong to the store, 409 when it is already
+	 * canceled or cannot be canceled from its status.
+	 */
+	@RequestMapping(value = { "/private/orders/{id}/cancel" }, method = RequestMethod.POST)
+	@ResponseStatus(HttpStatus.OK)
+	@ResponseBody
+	@ApiImplicitParams({
+			@ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT"),
+			@ApiImplicitParam(name = "lang", dataType = "string", defaultValue = "en") })
+	public ReadableOrderLifecycle cancel(@PathVariable final Long id,
+			@RequestBody(required = false) CancelRequest cancel, @ApiIgnore MerchantStore merchantStore,
+			@ApiIgnore Language language) {
+		authorizeMoneyMovement(merchantStore);
+		return orderFacade.cancelOrder(id, cancel == null ? null : cancel.getComment(), merchantStore);
+	}
+
+	/**
+	 * Asks the gateway again about a PAYMENT_PENDING or PAYMENT_REVIEW order and
+	 * settles it when the answer is clear (paid: ORDERED or PROCESSED; not paid:
+	 * PAYMENT_FAILED with the stock returned). Otherwise the order is left as it
+	 * is and the message says so. 409 for an order in any other status.
+	 */
+	@RequestMapping(value = { "/private/orders/{id}/payment/recheck" }, method = RequestMethod.POST)
+	@ResponseStatus(HttpStatus.OK)
+	@ResponseBody
+	@ApiImplicitParams({
+			@ApiImplicitParam(name = "store", dataType = "string", defaultValue = "DEFAULT"),
+			@ApiImplicitParam(name = "lang", dataType = "string", defaultValue = "en") })
+	public ReadableOrderLifecycle recheckPayment(@PathVariable final Long id, @ApiIgnore MerchantStore merchantStore,
+			@ApiIgnore Language language) {
+		authorizeMoneyMovement(merchantStore);
+		return orderFacade.recheckPayment(id, merchantStore);
+	}
+
+	/** Optional cancel request body. */
+	public static class CancelRequest {
+		private String comment;
+
+		public String getComment() {
+			return comment;
+		}
+
+		public void setComment(String comment) {
+			this.comment = comment;
+		}
+	}
+
+	private void authorizeOrderReader(MerchantStore merchantStore) {
+		String user = authorizationUtils.authenticatedUser();
+		authorizationUtils.authorizeUser(user, Stream.of(Constants.GROUP_SUPERADMIN, Constants.GROUP_ADMIN,
+				Constants.GROUP_ADMIN_ORDER, Constants.GROUP_ADMIN_RETAIL).collect(Collectors.toList()), merchantStore);
+	}
+
+	/** Same groups as capture and refund: these commands move money. */
+	private void authorizeMoneyMovement(MerchantStore merchantStore) {
+		String user = authorizationUtils.authenticatedUser();
+		authorizationUtils.authorizeUser(user, Stream.of(Constants.GROUP_SUPERADMIN, Constants.GROUP_ADMIN,
+				Constants.GROUP_ADMIN_ORDER).collect(Collectors.toList()), merchantStore);
 	}
 
 	@ExceptionHandler(IdempotencyConflictException.class)
