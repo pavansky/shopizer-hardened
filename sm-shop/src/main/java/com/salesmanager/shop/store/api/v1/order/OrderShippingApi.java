@@ -97,7 +97,7 @@ public class OrderShippingApi {
       String userName = principal.getName();
 
       // get customer id
-      Customer customer = customerService.getByNick(userName);
+      Customer customer = customerService.getByNick(userName, merchantStore.getId());
 
       if (customer == null) {
         response.sendError(503, "Error while getting user details to calculate shipping quote");

@@ -373,7 +373,7 @@ public class OrderApi {
 			Principal principal = request.getUserPrincipal();
 			String userName = principal.getName();
 
-			Customer customer = customerService.getByNick(userName);
+			Customer customer = customerService.getByNick(userName, merchantStore.getId());
 
 			if (customer == null) {
 				response.sendError(401, "Error while performing checkout customer not authorized");

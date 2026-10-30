@@ -266,7 +266,7 @@ public class OrderPaymentApi {
 			Principal principal = request.getUserPrincipal();
 			String userName = principal.getName();
 
-			Customer customer = customerService.getByNick(userName);
+			Customer customer = customerService.getByNick(userName, merchantStore.getId());
 
 			if (customer == null) {
 				response.sendError(401, "Error while initializing the payment customer not authorized");
