@@ -274,28 +274,18 @@ public class TaxServiceImpl
 	}
 
 	/**
-	 * The store's DEFAULT tax class. A store created without one (the store
-	 * API does not create it) falls back to its only tax class, if it has
-	 * exactly one; otherwise unclassified lines and shipping are not taxed.
-	 * Both cases are logged, since they usually mean a setup problem.
+	 * The store's DEFAULT tax class, or null when the store has none (the
+	 * store API does not create it). Unclassified lines and shipping are then
+	 * not taxed: picking another class would charge a rate nobody configured
+	 * for those lines. Logged, since it usually means a setup problem.
 	 */
 	private TaxClass defaultTaxClass(MerchantStore store) throws ServiceException {
 		TaxClass defaultTaxClass = taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store);
-		if(defaultTaxClass!=null) {
-			return defaultTaxClass;
+		if(defaultTaxClass==null) {
+			LOGGER.warn("Store {} has no {} tax class, products without a tax class and shipping are not taxed",
+					store.getCode(), TaxClass.DEFAULT_TAX_CLASS);
 		}
-		List<TaxClass> storeClasses = taxClassService.listByStore(store);
-		if(storeClasses!=null && storeClasses.size()==1) {
-			TaxClass only = storeClasses.get(0);
-			LOGGER.warn("Store {} has no {} tax class, products without a tax class are taxed at its only tax class {}",
-					store.getCode(), TaxClass.DEFAULT_TAX_CLASS, only.getCode());
-			return only;
-		}
-		if(storeClasses!=null && !storeClasses.isEmpty()) {
-			LOGGER.warn("Store {} has no {} tax class and {} other tax classes, products without a tax class and shipping are not taxed",
-					store.getCode(), TaxClass.DEFAULT_TAX_CLASS, storeClasses.size());
-		}
-		return null;
+		return defaultTaxClass;
 	}
 
 	private static int priority(TaxRate taxRate) {

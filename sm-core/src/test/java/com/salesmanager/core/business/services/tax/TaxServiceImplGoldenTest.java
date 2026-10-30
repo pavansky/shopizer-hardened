@@ -239,8 +239,8 @@ class TaxServiceImplGoldenTest {
 	}
 
 	@Test
-	void storeWithoutADefaultClassUsesItsOnlyTaxClassForUnclassifiedLines() throws Exception {
-		// a store created through the API has no DEFAULT class
+	void storeWithoutADefaultClassAndOneClassDoesNotTaxUnclassifiedLines() throws Exception {
+		// a store created through the API has no DEFAULT class; its only class must not stand in for it
 		rates.add(rate("VAT", "5", quebec, reduced, false));
 		when(taxClassService.getByCode(TaxClass.DEFAULT_TAX_CLASS, store)).thenReturn(null);
 		when(taxClassService.listByStore(store)).thenReturn(Arrays.asList(reduced));
@@ -248,7 +248,7 @@ class TaxServiceImplGoldenTest {
 		Map<String, BigDecimal> taxes = taxes(
 				summary(line("100.00", 1, null), line("30.00", 2, reduced)), customer(quebec, quebec));
 
-		assertEquals(single("VAT", "8.00"), taxes);
+		assertEquals(single("VAT", "3.00"), taxes);
 	}
 
 	@Test
