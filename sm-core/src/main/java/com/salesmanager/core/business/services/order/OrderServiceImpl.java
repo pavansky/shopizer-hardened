@@ -289,6 +289,8 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
          */
         BigDecimal subTotal = new BigDecimal(0);
         subTotal.setScale(2, RoundingMode.HALF_UP);
+        //order level reductions (coupons), taken off the tax base as well
+        BigDecimal discount = BigDecimal.ZERO;
         for(ShoppingCartItem item : summary.getProducts()) {
 
             BigDecimal st = item.getItemPrice().multiply(new BigDecimal(item.getQuantity()));
@@ -345,9 +347,15 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
 
 	        if(CollectionUtils.isNotEmpty(orderTotalVariation.getVariations())) {
 	        	for(OrderTotal variation : orderTotalVariation.getVariations()) {
+	        		if(variation.getValue()==null) {
+	        			continue;
+	        		}
+	        		//modules may compute the reduction from a double, keep money at 2 decimals
+	        		variation.setValue(variation.getValue().setScale(2, RoundingMode.HALF_UP));
 	        		variation.setSortOrder(currentCount++);
 	        		orderTotals.add(variation);
 	        		subTotal = subTotal.subtract(variation.getValue());
+	        		discount = discount.add(variation.getValue());
 	        	}
 	        }
 
@@ -408,7 +416,7 @@ public class OrderServiceImpl  extends SalesManagerEntityServiceImpl<Long, Order
         }
 
         //tax
-        List<TaxItem> taxes = taxService.calculateTax(summary, customer, store, language);
+        List<TaxItem> taxes = taxService.calculateTax(summary, customer, store, language, discount);
         if(taxes!=null && taxes.size()>0) {
         	BigDecimal totalTaxes = new BigDecimal(0);
         	totalTaxes.setScale(2, RoundingMode.HALF_UP);
