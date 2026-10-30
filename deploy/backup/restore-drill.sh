@@ -11,7 +11,8 @@
 #
 # Usage (from the repository root):
 #   deploy/backup/restore-drill.sh [--fresh]
-# ENV_FILE (default deploy/.env) and COMPOSE_PROJECT_NAME select another stack.
+# ENV_FILE (default deploy/.env) and COMPOSE_PROJECT_NAME select another stack; the dump is
+# read from that stack's BACKUP_DUMPS_DIR (default ./backup/dumps, relative to deploy/).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,6 +20,7 @@ ENV_FILE="${ENV_FILE:-.env}"
 set -a; . "$ENV_FILE"; set +a
 compose() { docker compose --env-file "$ENV_FILE" -f docker-compose.yml "$@"; }
 scratch="${COMPOSE_PROJECT_NAME:-shopizer}-restore-drill"
+dumps="${BACKUP_DUMPS_DIR:-./backup/dumps}"
 result=FAILED
 
 finish() {
@@ -38,13 +40,13 @@ if [ "${1:-}" = "--fresh" ]; then
   compose exec -T backup bash /backup.sh once || die "the backup job refused the new dump"
 fi
 
-dump=$(ls -1t backup/dumps/SALESMANAGER-*.sql.gz 2>/dev/null | head -1 || true)
-[ -n "$dump" ] || die "no dump in deploy/backup/dumps"
+dump=$(ls -1t "$dumps"/SALESMANAGER-*.sql.gz 2>/dev/null | head -1 || true)
+[ -n "$dump" ] || die "no dump in $dumps"
 echo "newest dump: $dump ($(wc -c < "$dump" | tr -d ' ') bytes)"
 
 [ -f "$dump.sha256" ] || die "no checksum file for $dump"
 if command -v sha256sum >/dev/null; then sum=(sha256sum -c); else sum=(shasum -a 256 -c); fi
-(cd backup/dumps && "${sum[@]}" "$(basename "$dump").sha256") || die "checksum mismatch"
+(cd "$dumps" && "${sum[@]}" "$(basename "$dump").sha256") || die "checksum mismatch"
 gzip -t "$dump" || die "not a valid gzip file"
 in_dump=$(gunzip -c "$dump" | grep -c '^CREATE TABLE ' || true)
 [ "$in_dump" -gt 0 ] || die "the dump contains no tables"
