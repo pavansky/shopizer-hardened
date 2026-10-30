@@ -53,6 +53,14 @@ public class CustomerServiceImpl extends SalesManagerEntityServiceImpl<Long, Cus
 	}
 	
 	@Override
+	public Customer getById(Long id, MerchantStore store) {
+		if (id == null || store == null || store.getId() == null) {
+			return null;
+		}
+		return customerRepository.findByIdAndStore(id, store.getId());
+	}
+
+	@Override
 	public Customer getByNick(String nick) {
 		return customerRepository.findByNick(nick);	
 	}

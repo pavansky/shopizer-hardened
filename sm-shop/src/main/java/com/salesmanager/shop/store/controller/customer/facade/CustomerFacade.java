@@ -169,9 +169,11 @@ public interface CustomerFacade
 
     ReadableCustomer getCustomerByNick(String userName, MerchantStore merchantStore, Language language);
 
-	void deleteByNick(String nick);
+	/** Deletes the customer with this nick in this store; 404 when there is none. */
+	void deleteByNick(String nick, MerchantStore store);
 	
-	void deleteById(Long id);
+	/** Deletes the customer with this id in this store; 404 when it belongs to another store. */
+	void deleteById(Long id, MerchantStore store);
 
 	void delete(Customer entity);
 

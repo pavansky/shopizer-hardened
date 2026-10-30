@@ -19,7 +19,19 @@ public interface CustomerService  extends SalesManagerEntityService<Long, Custom
 
 	List<Customer> getListByStore(MerchantStore store);
 
+	/**
+	 * Looks a customer up by nick across all stores. A nick is only unique per
+	 * store, so this fails when the same nick is registered in two stores.
+	 * Request handling code should use {@link #getByNick(String, int)} or
+	 * {@link #getByNick(String, String)} instead.
+	 */
 	Customer getByNick(String nick);
+
+	/**
+	 * Customer with this id in this store, or null when the id does not exist or
+	 * belongs to another store.
+	 */
+	Customer getById(Long id, MerchantStore store);
 
 	void saveOrUpdate(Customer customer) throws ServiceException ;
 

@@ -12,6 +12,14 @@ public interface CustomerRepository extends JpaRepository<Customer, Long>, Custo
 	
 	@Query("select c from Customer c join fetch c.merchantStore cm left join fetch c.defaultLanguage cl left join fetch c.attributes ca left join fetch ca.customerOption cao left join fetch ca.customerOptionValue cav left join fetch cao.descriptions caod left join fetch cav.descriptions left join fetch c.groups where c.id = ?1")
 	Customer findOne(Long id);
+
+	/**
+	 * Loads a customer only when it belongs to the given store. Use this for any
+	 * lookup by an id that comes from a request, so that one store cannot read or
+	 * change another store's customers by guessing ids.
+	 */
+	@Query("select c from Customer c join fetch c.merchantStore cm left join fetch c.defaultLanguage cl left join fetch c.attributes ca left join fetch ca.customerOption cao left join fetch ca.customerOptionValue cav left join fetch cao.descriptions caod left join fetch cav.descriptions left join fetch c.groups where c.id = ?1 and cm.id = ?2")
+	Customer findByIdAndStore(Long id, int storeId);
 	
 	@Query("select distinct c from Customer c join fetch c.merchantStore cm left join fetch c.defaultLanguage cl left join fetch c.attributes ca left join fetch ca.customerOption cao left join fetch ca.customerOptionValue cav left join fetch cao.descriptions caod left join fetch cav.descriptions left join fetch c.groups  where c.billing.firstName = ?1")
 	List<Customer> findByName(String name);

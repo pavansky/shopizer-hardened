@@ -180,7 +180,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
   public CustomerEntity getCustomerDataByUserName(final String userName, final MerchantStore store,
       final Language language) throws Exception {
     LOG.info("Fetching customer with userName" + userName);
-    Customer customer = customerService.getByNick(userName);
+    Customer customer = customerService.getByNick(userName, store.getId());
 
     if (customer != null) {
       LOG.info("Found customer, converting to CustomerEntity");
@@ -347,7 +347,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
       final MerchantStore merchantStore, Language language) throws Exception {
     LOG.info("Starting customer registration process..");
 
-    if (userExist(customer.getUserName())) {
+    if (userExist(customer.getUserName(), merchantStore)) {
       throw new UserAlreadyExistException("User already exist");
     }
 
@@ -465,7 +465,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
       boolean isBillingAddress) throws Exception {
     LOG.info("Fetching customer for id {} ", userId);
     Address address = null;
-    final Customer customerModel = customerService.getById(userId);
+    final Customer customerModel = customerService.getById(userId, merchantStore);
 
     if (customerModel == null) {
       LOG.error("Customer with ID {} does not exists..", userId);
@@ -496,7 +496,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
   public void updateAddress(Long userId, MerchantStore merchantStore, Address address,
       final Language language) throws Exception {
 
-    Customer customerModel = customerService.getById(userId);
+    Customer customerModel = customerService.getById(userId, merchantStore);
     Map<String, Country> countriesMap = countryService.getCountriesMap(language);
     Country country = countriesMap.get(address.getCountry());
 
@@ -557,8 +557,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
   public ReadableCustomer getCustomerById(final Long id, final MerchantStore merchantStore,
       final Language language) {
 
-    Customer customerModel = Optional.ofNullable(customerService.getById(id))
-        .orElseThrow(() -> new ResourceNotFoundException("No Customer found for ID : " + id));
+    Customer customerModel = getCustomerById(id, merchantStore);
 
     return convertCustomerToReadableCustomer(customerModel, merchantStore, language);
   }
@@ -586,7 +585,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
 
 	//set customer user name
 	customer.setUserName(customer.getEmailAddress());
-    if (userExist(customer.getUserName())) {
+    if (userExist(customer.getUserName(), store)) {
       throw new ServiceRuntimeException("User already exist");
     }
     //end user exists
@@ -616,8 +615,9 @@ public class CustomerFacadeImpl implements CustomerFacade {
 
   }
 
-  private boolean userExist(String userName) {
-    return Optional.ofNullable(customerService.getByNick(userName))
+  /** A nick is unique per store, so the same email can be registered in several stores. */
+  private boolean userExist(String userName, MerchantStore store) {
+    return Optional.ofNullable(customerService.getByNick(userName, store.getId()))
         .isPresent();
   }
 
@@ -674,13 +674,9 @@ public class CustomerFacadeImpl implements CustomerFacade {
 	      throw new ServiceRuntimeException("Can't update a customer with null id");
 	    }
 
-	    Customer cust = customerService.getById(customer.getId());
+	    Customer cust = getCustomerById(customer.getId(), store);
 
-	    try{
-	      customerPopulator.populate(customer, cust, store, store.getDefaultLanguage());
-	    } catch (ConversionException e) {
-	      throw new ConversionRuntimeException(e);
-	    }
+	    populateKeepingStore(customer, cust, store);
 
 	    saveCustomer(cust);
 	    customer.setId(cust.getId());
@@ -696,13 +692,9 @@ public class CustomerFacadeImpl implements CustomerFacade {
       throw new ServiceRuntimeException("Can't update a customer with null id");
     }
 
-    Customer cust = customerService.getById(customer.getId());
+    Customer cust = getCustomerById(customer.getId(), store);
 
-    try{
-      customerPopulator.populate(customer, cust, store, store.getDefaultLanguage());
-    } catch (ConversionException e) {
-      throw new ConversionRuntimeException(e);
-    }
+    populateKeepingStore(customer, cust, store);
 
     String password = customer.getPassword();
     if (StringUtils.isBlank(password)) {
@@ -714,6 +706,21 @@ public class CustomerFacadeImpl implements CustomerFacade {
     customer.setId(cust.getId());
 
     return customer;
+  }
+
+
+  /**
+   * Copies the request onto an existing customer. The customer was loaded for
+   * this store, and its store is never changed by an update.
+   */
+  private void populateKeepingStore(PersistableCustomer source, Customer target, MerchantStore store) {
+    MerchantStore owner = target.getMerchantStore();
+    try{
+      customerPopulator.populate(source, target, store, store.getDefaultLanguage());
+    } catch (ConversionException e) {
+      throw new ConversionRuntimeException(e);
+    }
+    target.setMerchantStore(owner);
   }
 
 
@@ -753,8 +760,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
       MerchantStore store, Language language) {
 
     //customer exist
-    Customer customer = getCustomerById(customerId);
-    Validate.notNull(customer, "Reviewed customer cannot be null");
+    Customer customer = getCustomerById(customerId, store);
 
     return customerReviewService.getByReviewedCustomer(customer)
         .stream()
@@ -774,8 +780,12 @@ public class CustomerFacadeImpl implements CustomerFacade {
     }
   }
 
-  private Customer getCustomerById(Long customerId) {
-    return Optional.ofNullable(customerService.getById(customerId))
+  /**
+   * Customer with this id in this store. A customer of another store is
+   * reported as not found (404, not 403) so its id is not confirmed.
+   */
+  private Customer getCustomerById(Long customerId, MerchantStore store) {
+    return Optional.ofNullable(customerService.getById(customerId, store))
           .orElseThrow(() -> new ResourceNotFoundException("Customer id " + customerId + " does not exists"));
   }
 
@@ -783,6 +793,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
   @Override
   public void deleteCustomerReview(Long customerId, Long reviewId, MerchantStore store, Language language) {
 
+    getCustomerById(customerId, store);
     CustomerReview customerReview = getCustomerReviewById(reviewId);
 
     if(!customerReview.getReviewedCustomer().getId().equals(customerId)) {
@@ -921,18 +932,18 @@ public class CustomerFacadeImpl implements CustomerFacade {
   @Override
   public ReadableCustomer getCustomerByNick(String userName, MerchantStore merchantStore,
       Language language) {
-    Customer customer = getByNick(userName);
+    Customer customer = getByNick(userName, merchantStore);
     return convertCustomerToReadableCustomer(customer, merchantStore, language);
   }
 
   @Override
-  public void deleteByNick(String userName) {
-    Customer customer = getByNick(userName);
+  public void deleteByNick(String userName, MerchantStore store) {
+    Customer customer = getByNick(userName, store);
     delete(customer);
   }
 
-  private Customer getByNick(String userName) {
-    return Optional.ofNullable(customerService.getByNick(userName))
+  private Customer getByNick(String userName, MerchantStore store) {
+    return Optional.ofNullable(customerService.getByNick(userName, store.getId()))
         .orElseThrow(() -> new ResourceNotFoundException("No Customer found for ID : " + userName));
   }
 
@@ -981,6 +992,8 @@ public class CustomerFacadeImpl implements CustomerFacade {
       MerchantStore merchantStore,
       Language language) {
 
+    getCustomerById(customerId, merchantStore);
+
     // rating already exist
     Optional<CustomerReview> customerReview =
         Optional.ofNullable(
@@ -1006,6 +1019,7 @@ public class CustomerFacadeImpl implements CustomerFacade {
   public PersistableCustomerReview updateCustomerReview(Long id, Long reviewId, PersistableCustomerReview review,
       MerchantStore store, Language language) {
 
+    getCustomerById(id, store);
     CustomerReview customerReview = getCustomerReviewById(reviewId);
 
     if(! customerReview.getReviewedCustomer().getId().equals(id)) {
@@ -1023,8 +1037,8 @@ public class CustomerFacadeImpl implements CustomerFacade {
 
 
   @Override
-  public void deleteById(Long id) {
-    Customer customer = getCustomerById(id);
+  public void deleteById(Long id, MerchantStore store) {
+    Customer customer = getCustomerById(id, store);
     delete(customer);
     
   }
@@ -1032,6 +1046,10 @@ public class CustomerFacadeImpl implements CustomerFacade {
 
   @Override
   public void updateAddress(PersistableCustomer customer, MerchantStore store) {
+
+    // Checked before the try block below so another store's id is a 404, not a
+    // wrapped server error.
+    getCustomerById(customer.getId(), store);
 
 
     if(customer.getBilling() != null) {

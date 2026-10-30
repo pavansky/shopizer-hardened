@@ -101,7 +101,7 @@ public class CustomerApi {
 		userFacade.authorizedGroup(authenticatedUser, Stream.of(Constants.GROUP_SUPERADMIN, Constants.GROUP_ADMIN, Constants.GROUP_ADMIN_RETAIL).collect(Collectors.toList()));
     	
 		
-		customerFacade.deleteById(id);
+		customerFacade.deleteById(id, merchantStore);
 	}
 
 	/**
