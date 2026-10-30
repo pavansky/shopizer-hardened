@@ -31,9 +31,12 @@ import com.salesmanager.shop.admin.security.WebUserServices;
 import com.salesmanager.shop.store.controller.customer.facade.CustomerFacade;
 import com.salesmanager.shop.store.security.AuthenticationTokenFilter;
 import com.salesmanager.shop.store.security.ServicesAuthenticationSuccessHandler;
+import com.salesmanager.shop.store.security.abuse.AbuseProtectionConfig;
 import com.salesmanager.shop.store.security.abuse.ClientIpResolver;
 import com.salesmanager.shop.store.security.abuse.LockoutAuthenticationProvider;
 import com.salesmanager.shop.store.security.abuse.LoginAttemptTracker;
+import com.salesmanager.shop.store.security.abuse.RateLimitFilter;
+import com.salesmanager.shop.store.security.abuse.TokenBucketLimiter;
 import com.salesmanager.shop.store.security.admin.AdminSelfAccess;
 import com.salesmanager.shop.store.security.admin.JWTAdminAuthenticationProvider;
 import com.salesmanager.shop.store.security.audit.AdminAuditFilter;
@@ -100,6 +103,19 @@ public class MultipleEntryPointsSecurityConfig {
 		return new AdminSelfAccess();
 	}
 
+	/**
+	 * HTTP Basic credentials are checked by BasicAuthenticationFilter inside the
+	 * security chain, before the servlet-level rate limit filter runs. Chains that
+	 * accept Basic call this to apply the login budget in front of that filter.
+	 */
+	static void limitBasicAuthentication(HttpSecurity http, org.springframework.core.env.Environment env,
+			TokenBucketLimiter loginRateLimiter, ClientIpResolver clientIpResolver) {
+		if (env.getProperty("shopizer.ratelimit.enabled", Boolean.class, Boolean.TRUE)) {
+			RateLimitFilter filter = AbuseProtectionConfig.basicAuthRateLimitFilter(loginRateLimiter, clientIpResolver);
+			http.addFilterBefore(filter, BasicAuthenticationFilter.class);
+		}
+	}
+
 	
 	
 	/**
@@ -120,6 +136,15 @@ public class MultipleEntryPointsSecurityConfig {
 
 		@Autowired
 		private UserDetailsService customerDetailsService;
+
+		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
+		@Autowired
+		private ClientIpResolver clientIpResolver;
 
 		public CustomerConfigurationAdapter() {
 			super();
@@ -142,6 +167,7 @@ public class MultipleEntryPointsSecurityConfig {
 
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
 			http
 			.antMatcher("/shop/**")
 			.csrf().disable()			
@@ -208,6 +234,12 @@ public class MultipleEntryPointsSecurityConfig {
 		private LoginAttemptTracker loginAttemptTracker;
 
 		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
+		@Autowired
 		private ClientIpResolver clientIpResolver;
 
 		@Autowired
@@ -220,7 +252,8 @@ public class MultipleEntryPointsSecurityConfig {
 			dao.setUserDetailsService(userDetailsService);
 			dao.setPasswordEncoder(passwordEncoder);
 			dao.afterPropertiesSet();
-			auth.authenticationProvider(new LockoutAuthenticationProvider("admin", dao, loginAttemptTracker));
+			auth.authenticationProvider(
+					new LockoutAuthenticationProvider("admin", dao, loginAttemptTracker, clientIpResolver));
 		}
 
 		/**
@@ -230,6 +263,7 @@ public class MultipleEntryPointsSecurityConfig {
 		 */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
 			http
 			.antMatcher("/services/**")
 			.csrf().disable()
@@ -369,6 +403,12 @@ public class MultipleEntryPointsSecurityConfig {
 		@Autowired
 		private ClientIpResolver clientIpResolver;
 
+		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
 		/**
 		 * Admin login (POST /private/login and HTTP Basic on this chain) goes
 		 * through one provider only: JWTAdminAuthenticationProvider behind the
@@ -377,8 +417,8 @@ public class MultipleEntryPointsSecurityConfig {
 		 */
 		@Override
 		public void configure(AuthenticationManagerBuilder auth) throws Exception {
-			auth.authenticationProvider(
-					new LockoutAuthenticationProvider("admin", authenticationProvider(), loginAttemptTracker));
+			auth.authenticationProvider(new LockoutAuthenticationProvider("admin", authenticationProvider(),
+					loginAttemptTracker, clientIpResolver));
 		}
 		
 		@Override
@@ -411,6 +451,7 @@ public class MultipleEntryPointsSecurityConfig {
 			final String staff = "hasRole('AUTH')";
 			final String admin = "hasAnyAuthority('ADMIN','SUPERADMIN')";
 			final String groups = API_VERSION + "/sec/private/**";
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
 			http
 					.requestMatchers().antMatchers(p + "/**", groups)
 					.and()
@@ -539,6 +580,15 @@ public class MultipleEntryPointsSecurityConfig {
 		@Autowired
 		private LoginAttemptTracker loginAttemptTracker;
 
+		@Autowired
+		private org.springframework.core.env.Environment env;
+
+		@Autowired
+		private TokenBucketLimiter loginRateLimiter;
+
+		@Autowired
+		private ClientIpResolver clientIpResolver;
+
 		/**
 		 * Customer login: the standard DAO provider (unknown users and wrong
 		 * passwords both fail as bad credentials) behind the per-account lockout.
@@ -549,12 +599,14 @@ public class MultipleEntryPointsSecurityConfig {
 			dao.setUserDetailsService(jwtCustomerDetailsService);
 			dao.setPasswordEncoder(passwordEncoder);
 			dao.afterPropertiesSet();
-			auth.authenticationProvider(new LockoutAuthenticationProvider("customer", dao, loginAttemptTracker));
+			auth.authenticationProvider(
+					new LockoutAuthenticationProvider("customer", dao, loginAttemptTracker, clientIpResolver));
 		}
 
 		/** Stateless like the admin API: the bearer token is checked on every request. */
 		@Override
 		protected void configure(HttpSecurity http) throws Exception {
+			limitBasicAuthentication(http, env, loginRateLimiter, clientIpResolver);
 			http
 			
 				.antMatcher(API_VERSION + "/auth/**")

@@ -1,16 +1,27 @@
 package com.salesmanager.shop.store.security.abuse;
 
+import javax.servlet.http.HttpServletRequest;
+
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 /**
- * Wraps the provider that checks passwords with a per-account lockout.
+ * Wraps the provider that checks passwords with a lockout per account and
+ * client address.
  *
  * Every failure (wrong password, unknown user, disabled user) counts. A locked
  * account fails with the same BadCredentialsException as a wrong password, so
  * the login endpoints return the same status and body in every case.
+ *
+ * The lock is keyed on the account and the client address (resolved with the
+ * trusted-proxy rules), so failures from one address cannot lock the owner out
+ * when they sign in from another. Guessing across many addresses is bounded by
+ * the per-address rate limits on every login path.
  */
 public class LockoutAuthenticationProvider implements AuthenticationProvider {
 
@@ -19,16 +30,19 @@ public class LockoutAuthenticationProvider implements AuthenticationProvider {
 	private final String realm;
 	private final AuthenticationProvider delegate;
 	private final LoginAttemptTracker tracker;
+	private final ClientIpResolver clientIpResolver;
 
-	public LockoutAuthenticationProvider(String realm, AuthenticationProvider delegate, LoginAttemptTracker tracker) {
+	public LockoutAuthenticationProvider(String realm, AuthenticationProvider delegate, LoginAttemptTracker tracker,
+			ClientIpResolver clientIpResolver) {
 		this.realm = realm;
 		this.delegate = delegate;
 		this.tracker = tracker;
+		this.clientIpResolver = clientIpResolver;
 	}
 
 	@Override
 	public Authentication authenticate(Authentication authentication) throws AuthenticationException {
-		String key = LoginAttemptTracker.key(realm, authentication.getName());
+		String key = LoginAttemptTracker.key(realm, authentication.getName()) + "|" + clientAddress();
 		if (tracker.isLocked(key)) {
 			throw new BadCredentialsException(MESSAGE);
 		}
@@ -43,6 +57,17 @@ public class LockoutAuthenticationProvider implements AuthenticationProvider {
 			tracker.recordSuccess(key);
 		}
 		return result;
+	}
+
+	/** The client address of the current request, or empty when there is no request (tests, batch). */
+	private String clientAddress() {
+		RequestAttributes attributes = RequestContextHolder.getRequestAttributes();
+		if (clientIpResolver == null || !(attributes instanceof ServletRequestAttributes)) {
+			return "";
+		}
+		HttpServletRequest request = ((ServletRequestAttributes) attributes).getRequest();
+		String address = clientIpResolver.resolve(request);
+		return address == null ? "" : address;
 	}
 
 	@Override

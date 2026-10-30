@@ -14,12 +14,16 @@ import static org.mockito.Mockito.when;
 
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.core.Authentication;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 /** Per-account lockout: N failures lock the account, even the right password then fails the same way. */
 class LockoutAuthenticationProviderTest {
@@ -44,7 +48,7 @@ class LockoutAuthenticationProviderTest {
 			throw new BadCredentialsException("Username/Password does not match");
 		});
 		LoginAttemptTracker tracker = new LoginAttemptTracker(3, 900, 300, now::get);
-		provider = new LockoutAuthenticationProvider("admin", delegate, tracker);
+		provider = new LockoutAuthenticationProvider("admin", delegate, tracker, new ClientIpResolver(""));
 	}
 
 	@Test
@@ -95,6 +99,31 @@ class LockoutAuthenticationProviderTest {
 		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
 		now.addAndGet(901_000L);
 		assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		assertNotNull(provider.authenticate(good));
+	}
+
+	@AfterEach
+	void clearRequest() {
+		RequestContextHolder.resetRequestAttributes();
+	}
+
+	private static void requestFrom(String address) {
+		MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/private/login");
+		request.setRemoteAddr(address);
+		RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
+	}
+
+	@Test
+	void failuresFromOneAddressDoNotLockTheOwnerOutElsewhere() {
+		requestFrom("203.0.113.9");
+		for (int i = 0; i < 3; i++) {
+			assertThrows(BadCredentialsException.class, () -> provider.authenticate(bad));
+		}
+		// the attacking address is locked, even with the right password
+		assertThrows(BadCredentialsException.class, () -> provider.authenticate(good));
+
+		// the owner signing in from their own address is not
+		requestFrom("198.51.100.20");
 		assertNotNull(provider.authenticate(good));
 	}
 }

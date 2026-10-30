@@ -135,4 +135,37 @@ class RateLimitFilterTest {
 		assertEquals(0, limiter.tryConsume("new"));
 		assertTrue(limiter.trackedKeys() < 10);
 	}
+
+	private MockHttpServletResponse basic(RateLimitFilter f, String method, String uri, String authorization)
+			throws Exception {
+		MockHttpServletRequest req = new MockHttpServletRequest(method, uri);
+		req.setRemoteAddr("10.0.0.7");
+		if (authorization != null) {
+			req.addHeader("Authorization", authorization);
+		}
+		MockHttpServletResponse res = new MockHttpServletResponse();
+		f.doFilter(req, res, new MockFilterChain());
+		return res;
+	}
+
+	@Test
+	void httpBasicCredentialsOnAnyMethodSpendTheLoginBudget() throws Exception {
+		TokenBucketLimiter login = new TokenBucketLimiter(3, 60, nanos::get);
+		RateLimitFilter servlet = new RateLimitFilter(java.util.Collections.singletonList(
+				new RateLimitFilter.Rule("login", "POST", login, "/api/v*/private/login")), new ClientIpResolver(""));
+		RateLimitFilter inChain = AbuseProtectionConfig.basicAuthRateLimitFilter(login, new ClientIpResolver(""));
+
+		// password spraying with Basic, one username per request
+		assertEquals(200, basic(inChain, "GET", "/api/v1/private/user/profile", "Basic dXNlcjE6eA==").getStatus());
+		assertEquals(200, basic(inChain, "DELETE", "/services/private/system/module", "basic dXNlcjI6eA==").getStatus());
+		// the login endpoint draws from the same bucket
+		assertEquals(200, basic(servlet, "POST", "/api/v1/private/login", null).getStatus());
+		MockHttpServletResponse limited = basic(inChain, "GET", "/api/v1/private/orders", "Basic dXNlcjM6eA==");
+		assertEquals(429, limited.getStatus());
+		assertTrue(Long.parseLong(limited.getHeader("Retry-After")) >= 1);
+
+		// bearer tokens and anonymous calls are not login attempts
+		assertEquals(200, basic(inChain, "GET", "/api/v1/private/orders", "Bearer abc").getStatus());
+		assertEquals(200, basic(inChain, "GET", "/api/v1/private/orders", null).getStatus());
+	}
 }

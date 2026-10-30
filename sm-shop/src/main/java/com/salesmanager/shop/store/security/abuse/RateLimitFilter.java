@@ -33,15 +33,32 @@ public class RateLimitFilter extends OncePerRequestFilter {
 	/** A named group of endpoints sharing one limit. */
 	public static final class Rule {
 		final String name;
+		/** HTTP method, or null for any method. */
 		final String method;
 		final List<String> patterns;
 		final TokenBucketLimiter limiter;
+		/** Only requests carrying HTTP Basic credentials count. */
+		final boolean basicAuthOnly;
 
 		public Rule(String name, String method, TokenBucketLimiter limiter, String... patterns) {
+			this(name, method, false, limiter, patterns);
+		}
+
+		private Rule(String name, String method, boolean basicAuthOnly, TokenBucketLimiter limiter, String... patterns) {
 			this.name = name;
 			this.method = method;
+			this.basicAuthOnly = basicAuthOnly;
 			this.limiter = limiter;
 			this.patterns = Collections.unmodifiableList(Arrays.asList(patterns));
+		}
+
+		/**
+		 * Every request with an "Authorization: Basic" header on the patterns, any
+		 * method. HTTP Basic checks a password on each request, so each one is a
+		 * login attempt.
+		 */
+		public static Rule basicAuth(String name, TokenBucketLimiter limiter, String... patterns) {
+			return new Rule(name, null, true, limiter, patterns);
 		}
 	}
 
@@ -82,7 +99,10 @@ public class RateLimitFilter extends OncePerRequestFilter {
 			path = path.substring(0, path.length() - 1);
 		}
 		for (Rule rule : rules) {
-			if (!rule.method.equalsIgnoreCase(request.getMethod())) {
+			if (rule.method != null && !rule.method.equalsIgnoreCase(request.getMethod())) {
+				continue;
+			}
+			if (rule.basicAuthOnly && !hasBasicCredentials(request)) {
 				continue;
 			}
 			for (String pattern : rule.patterns) {
@@ -92,5 +112,10 @@ public class RateLimitFilter extends OncePerRequestFilter {
 			}
 		}
 		return null;
+	}
+
+	static boolean hasBasicCredentials(HttpServletRequest request) {
+		String header = request.getHeader("Authorization");
+		return header != null && header.regionMatches(true, 0, "Basic ", 0, 6);
 	}
 }
