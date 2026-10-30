@@ -79,6 +79,26 @@ public class EncryptionImplTest {
 		assertTrue(e.encrypt(plain).startsWith("v2:"));
 	}
 
+	/**
+	 * Fixed vector written by the pre-v2 EncryptionImpl on main with secretKey=7070200000000007
+	 * (the shipped default). It matches openssl aes-128-cbc with IV "fedcba9876543210", and
+	 * guards against the legacy decrypt path drifting together with the helper above.
+	 */
+	private static final String MAIN_BRANCH_CBC_HEX = "df02614ab6600db0eb4d78e2c4df5574f9ba1903c78f9da01dded48dcbe5fa13"
+			+ "95559a2eb8160dd8615b22e900932a7bac035d6eaa57b1ec05f4cedf94c2d8054819918ba0b244669d6987678949825e"
+			+ "a5dc3d9f582cab63e3a11d9f5dd0a95f6f0ce3ec010beb3a0aaa09cab69bb4208a6139d83fd2afb40c29caa1c439815a"
+			+ "db67deae127d153f7724250620ba6b51";
+	private static final String MAIN_BRANCH_PLAIN = "[{\"moduleCode\":\"moneyorder\",\"active\":true,\"defaultSelected\":true,"
+			+ "\"environment\":\"TEST\",\"integrationKeys\":{\"address\":\"1 Main St\"}}]";
+
+	@Test
+	public void valueWrittenByPreviousReleaseDecrypts() throws Exception {
+		EncryptionImpl e = encryption(KEY, LEGACY_KEY);
+		assertEquals(MAIN_BRANCH_PLAIN, e.decrypt(MAIN_BRANCH_CBC_HEX));
+		assertEquals("test helper must match the previous release", MAIN_BRANCH_CBC_HEX,
+				legacyEncrypt(MAIN_BRANCH_PLAIN));
+	}
+
 	@Test
 	public void legacyValueWithoutLegacyKeyFailsWithClearMessage() throws Exception {
 		EncryptionImpl e = encryption(KEY, null);
