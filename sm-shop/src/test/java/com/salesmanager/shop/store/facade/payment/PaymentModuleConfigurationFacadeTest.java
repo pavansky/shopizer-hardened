@@ -84,7 +84,7 @@ class PaymentModuleConfigurationFacadeTest {
 		IntegrationModuleConfiguration read = facade.read("stripe", store);
 
 		assertEquals("****1234", read.getIntegrationKeys().get("secretKey"));
-		assertEquals("****1111", read.getIntegrationKeys().get("publishableKey"));
+		assertEquals(stored.getIntegrationKeys().get("publishableKey"), read.getIntegrationKeys().get("publishableKey"), "publishable keys are public by design");
 		assertEquals(SECRET, stored.getIntegrationKeys().get("secretKey"), "stored configuration is not modified");
 	}
 
@@ -109,7 +109,7 @@ class PaymentModuleConfigurationFacadeTest {
 		stripeModuleKnown();
 		when(paymentService.getPaymentModulesConfigured(store)).thenReturn(Collections.singletonMap("stripe", stored));
 
-		Set<String> changed = facade.save(submitted("****1234", "****1111"), store, "admin@shopizer.com");
+		Set<String> changed = facade.save(submitted("****1234", stored.getIntegrationKeys().get("publishableKey")), store, "admin@shopizer.com");
 
 		assertTrue(changed.isEmpty());
 		verify(auditService, never()).record(any(), anyString(), anyString(), anyString(), anyCollection());

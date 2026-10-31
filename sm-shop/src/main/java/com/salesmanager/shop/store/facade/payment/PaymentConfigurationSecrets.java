@@ -41,7 +41,8 @@ public final class PaymentConfigurationSecrets {
 			"address", "note", "price", "transaction", // money order, store pickup, transaction type
 			"username", "userid", "account", // gateway and carrier login names
 			"merchant_id", "merchantid", // Braintree, Beanstream
-			"public_key", "client"))); // Braintree public key, PayPal REST client id
+			"public_key", "client", // Braintree public key, PayPal REST client id
+			"publishablekey", "tokenization_key"))); // Stripe publishable key and Braintree tokenization key are shipped to browsers by design
 
 	private PaymentConfigurationSecrets() {
 	}

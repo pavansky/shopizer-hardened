@@ -26,11 +26,13 @@ class PaymentConfigurationSecretsTest {
 
 	@Test
 	void secretNamesAreRecognised() {
-		for (String name : Arrays.asList("secretKey", "publishableKey", "private_key", "tokenization_key", "password",
+		for (String name : Arrays.asList("secretKey", "private_key", "password",
 				"webhookSecret", "signature", "accessKey", "apiToken", "PRIVATEKEY")) {
 			assertTrue(PaymentConfigurationSecrets.isSecretName(name), name);
 		}
-		for (String name : Arrays.asList("address", "merchant_id", "username", "note", "account", "USERNAME")) {
+		// publishable and tokenization keys are sent to browsers by design, so they are shown
+		for (String name : Arrays.asList("address", "merchant_id", "username", "note", "account", "USERNAME",
+				"publishableKey", "tokenization_key")) {
 			assertFalse(PaymentConfigurationSecrets.isSecretName(name), name);
 		}
 	}

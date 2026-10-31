@@ -149,7 +149,7 @@ public class PaymentConfigurationApiIntegrationTest extends ServicesTestSupport 
 		ResponseEntity<IntegrationModuleConfiguration> read = read(admin);
 		assertEquals(HttpStatus.OK, read.getStatusCode());
 		assertEquals("****7890", read.getBody().getIntegrationKeys().get("secretKey"));
-		assertEquals("****4321", read.getBody().getIntegrationKeys().get("publishableKey"));
+		assertEquals("publishable keys are public by design", PUBLISHABLE, read.getBody().getIntegrationKeys().get("publishableKey"));
 
 		// send the masked values back with a new publishable key: the secret stays as stored
 		IntegrationModuleConfiguration update = stripe("****7890", "pk_test_rotated_00005555");
