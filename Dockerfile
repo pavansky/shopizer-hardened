@@ -1,6 +1,6 @@
 # Two-stage build from source. Build:  docker build -t shopizer-api .
 # Stage 1 compiles with the same JDK the CI uses; stage 2 is a small non-root JRE image.
-FROM maven:3.9-eclipse-temurin-11 AS build
+FROM maven:3.9-eclipse-temurin-26 AS build
 WORKDIR /src
 # dependency layer first, so code changes do not re-download the world
 COPY pom.xml ./
